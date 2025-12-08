@@ -533,11 +533,6 @@ with st.expander("📚 **GUÍA RÁPIDA DE USO - ROSTADINA EIRL**", expanded=True
        - **Correlaciones**: Diversificación del portfolio
        - **Recomendaciones**: Estrategias por perfil
     
-    3. **🏢 CONFIGURACIÓN DE PORTFOLIO** (Pestaña 7 - Opcional)
-       - Define capital total a invertir
-       - Configura distribución porcentual
-       - Activa análisis específico de ROSTADINA
-    
     ### ⚠️ **CONSIDERACIONES IMPORTANTES:**
     - Los datos provienen de **Yahoo Finance** en tiempo real
     - Las métricas de riesgo son **estimaciones históricas**
@@ -549,10 +544,9 @@ with st.expander("📚 **GUÍA RÁPIDA DE USO - ROSTADINA EIRL**", expanded=True
     with col_info1:
         st.markdown("""
         ### 📞 **CONTACTO Y SOPORTE**
-        **ROSTADINA EIRL**  
-        📧 contacto@rostadina.com  
-        📱 +51 999 888 777  
-        🏢 Av. Principal 123, Lima
+        **Linkedin: ROSTADINA EIRL**  
+        📧 rodrigoluisyauliblas@icloud.com  
+        📱 +51 989911582  
         """)
     
     with col_info2:
@@ -1307,7 +1301,7 @@ with tab7:
 # PIE DE PÁGINA
 # ============================================================================
 st.sidebar.markdown("---")
-st.sidebar.markdown("**© 2024 ROSTADINA EIRL**")
+st.sidebar.markdown("**© 2025 ROSTADINA EIRL**")
 st.sidebar.markdown("Dashboard de Análisis Financiero")
 st.sidebar.markdown("Versión 2.2 | Datos: Yahoo Finance")
 st.sidebar.markdown("**Uso:** Análisis general + Portfolio opcional")
