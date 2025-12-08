@@ -308,25 +308,38 @@ def sistema_alertas_generales():
 col_logo, col_titulo = st.columns([1, 3])
 
 with col_logo:
-    # URL del logo en GitHub (ejemplo)
-    LOGO_URL = "https://github.com/Rodrigotr21/Riesgo-Financiero/blob/main/Logo_ROSTADINA.jpeg"
-
-    # En tu código:
-    st.image(LOGO_URL, width=150)
+    st.markdown('<div style="text-align: center;">', unsafe_allow_html=True)
     
-    # Intentar cargar el logo, si falla mostrar texto alternativo
+    # ✅ CORRECTO: URL RAW de GitHub
+    LOGO_URL = "https://raw.githubusercontent.com/Rodrigotr21/Riesgo-Financiero/main/Logo_ROSTADINA.jpeg"
+    
+    # Intentar cargar el logo
     try:
         st.image(LOGO_URL, width=150)
     except Exception as e:
-        # Mostrar placeholder si no hay logo
-        st.markdown('<div style="text-align: center; padding: 40px; background: #1E3A8A; color: white; border-radius: 10px;">', unsafe_allow_html=True)
-        st.markdown('<h2>🏢</h2>', unsafe_allow_html=True)
-        st.markdown('<div style="font-size: 1.5rem; font-weight: bold;">ROSTADINA</div>', unsafe_allow_html=True)
-        st.markdown('<div style="font-size: 1rem;">EIRL</div>', unsafe_allow_html=True)
-        st.markdown('</div>', unsafe_allow_html=True)
-        st.error(f"Logo no encontrado: {ruta_logo}")
+        # Mostrar placeholder elegante si falla
+        st.markdown("""
+        <div style="
+            width: 150px; 
+            height: 100px; 
+            margin: 0 auto;
+            background: linear-gradient(135deg, #1E3A8A 0%, #3B82F6 100%);
+            border-radius: 10px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            color: white;
+        ">
+            <div style="font-size: 2rem;">🏢</div>
+            <div style="font-size: 0.9rem; font-weight: bold;">ROSTADINA</div>
+            <div style="font-size: 0.7rem;">EIRL</div>
+        </div>
+        """, unsafe_allow_html=True)
+        # st.warning(f"Logo no cargado. Usando placeholder.")  # Opcional
     
-    st.markdown('<div style="font-size: 1.2rem; color: #1E3A8A; font-weight: bold; text-align: center;">ROSTADINA EIRL</div>', unsafe_allow_html=True)
+    st.markdown('<div style="font-size: 1.2rem; color: #1E3A8A; font-weight: bold; margin-top: 10px;">ROSTADINA EIRL</div>', unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
 
 with col_titulo:
     st.markdown('<h1 class="main-header">📊 Dashboard de Análisis Financiero</h1>', unsafe_allow_html=True)
