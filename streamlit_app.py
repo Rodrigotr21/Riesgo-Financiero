@@ -12,12 +12,53 @@ warnings.filterwarnings('ignore')
 from transformers import pipeline
 from deep_translator import GoogleTranslator
 
-# OPTIMIZACIÓN CRÍTICA: Cargar el modelo en caché para que solo se descargue/lea UNA vez
+# 1. CONFIGURACIÓN INICIAL (SIEMPRE PRIMERO)
+st.set_page_config(
+    page_title="Dashboard de Riesgo Financiero - ROSTADINA EIRL",
+    page_icon="📊",
+    layout="wide"
+)
+
+# 2. CARGA DE MODELOS CON CACHÉ
 @st.cache_resource
 def cargar_modelos_ia():
     analista = pipeline("sentiment-analysis", model="ProsusAI/finbert")
     traductor = GoogleTranslator(source='auto', target='en')
     return analista, traductor
+
+# 3. LOGICA MATEMÁTICA DEL MOTOR DE IA (Evita errores de NameError en Tab 8)
+def procesar_riesgo_ia(noticias_fuente):
+    analista_ia, traductor = cargar_modelos_ia()
+    scores_por_capa = {"macro": [], "social": [], "micro": []}
+    detalles_noticias = []
+    
+    for item in noticias_fuente:
+        noticia = item["texto"]
+        capa = item["capa"]
+        texto_analizar = noticia if noticia.isascii() else traductor.translate(noticia)
+        
+        res = analista_ia(texto_analizar)[0]
+        label, score = res['label'], res['score']
+        
+        w = -1 if label == 'negative' else (1 if label == 'positive' else 0)
+        impacto_ponderado = w * score
+        scores_por_capa[capa].append(impacto_ponderado)
+        
+        detalles_noticias.append({
+            "noticia": noticia,
+            "capa": capa.upper(),
+            "sentimiento": label.upper(),
+            "confianza": score
+        })
+        
+    I_macro = np.mean(scores_por_capa["macro"]) if scores_por_capa["macro"] else 0.0
+    I_social = np.mean(scores_por_capa["social"]) if scores_por_capa["social"] else 0.0
+    I_micro = np.mean(scores_por_capa["micro"]) if scores_por_capa["micro"] else 0.0
+    
+    S_raw = (0.40 * I_macro) + (0.35 * I_social) + (0.25 * I_micro)
+    SEM = 50 * (1 - S_raw)
+    
+    return SEM, I_macro, I_social, I_micro, detalles_noticias
 
 # ============================================================================
 # CONFIGURACIÓN INICIAL - DEBE SER LO PRIMERO
