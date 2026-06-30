@@ -12,23 +12,21 @@ warnings.filterwarnings('ignore')
 from transformers import pipeline
 from deep_translator import GoogleTranslator
 
-# 1. CONFIGURACIÓN INICIAL (SIEMPRE PRIMERO)
+# ============================================================================
+# CONFIGURACIÓN INICIAL - ESTA DEBE SER ESTRICTAMENTE LA LÍNEA ACTIVA NÚMERO 1 DE STREAMLIT
+# ============================================================================
 st.set_page_config(
     page_title="Dashboard de Riesgo Financiero - ROSTADINA EIRL",
     page_icon="📊",
     layout="wide"
 )
 
-# 2. CARGA DE MODELOS CON CACHÉ
+# OPTIMIZACIÓN CRÍTICA: Cargar el modelo en caché después de configurar la página
 @st.cache_resource
 def cargar_modelos_ia():
     analista = pipeline("sentiment-analysis", model="ProsusAI/finbert")
     traductor = GoogleTranslator(source='auto', target='en')
     return analista, traductor
-
-# 3. LOGICA MATEMÁTICA DEL MOTOR DE IA (Evita errores de NameError en Tab 8)
-def procesar_riesgo_ia(noticias_fuente):
-    analista_ia, traductor = cargar_modelos_ia()
     scores_por_capa = {"macro": [], "social": [], "micro": []}
     detalles_noticias = []
     
@@ -329,22 +327,13 @@ def sistema_alertas_generales():
                 "recomendacion": "Monitorear de cerca"
             })
     
-    # 2. Alertas por drawdown
-    for empresa in close_prices.columns:
-        dd = calcular_drawdown(close_prices[empresa])
-        if not dd.empty and dd.min() < UMBRAL_DRAWDOWN:
-            alertas.append({
-                "nivel": "🔴 CRÍTICO",
-                "mensaje": f"<strong>{empresa}</strong>: Drawdown histórico > 20% ({dd.min()*100:.1f}%)",
-                "recomendacion": "Revisar estrategia de salida"
-            })
+# SELECCIÓN NETAMENTE MERCADO PERUANO
+    tickers_por_defecto = ["BAP", "SCCO", "BVN", "IFS", "ALICORC1.LM", "CREDIC1.LM"]
     
-    # 3. Alertas por correlación excesiva
-    if len(returns.columns) > 1:
-        corr_matrix = returns.corr()
-        for i in range(len(corr_matrix.columns)):
-            for j in range(i+1, len(corr_matrix.columns)):
-                if abs(corr_matrix.iloc[i, j]) > UMBRAL_CORRELACION:
+    tickers_input = st.text_input(
+        "Introduce los Tickers separados por comas (Ejemplo: Corporación Aceros Arequipa, Alicorp, Volcan, Buenaventura):",
+        value=", ".join(tickers_por_defecto)
+    )
                     alertas.append({
                         "nivel": "🟡 ADVERTENCIA",
                         "mensaje": f"Alta correlación entre <strong>{corr_matrix.columns[i]}</strong> y <strong>{corr_matrix.columns[j]}</strong> ({corr_matrix.iloc[i, j]:.2f})",
@@ -408,48 +397,14 @@ def procesar_riesgo_ia(noticias_fuente):
 # ============================================================================
 col_logo, col_titulo = st.columns([1, 3])
 
-with col_logo:
-    st.markdown('<div style="text-align: center;">', unsafe_allow_html=True)
-    
-    # ✅ CORRECTO: URL RAW de GitHub
-    LOGO_URL = "https://raw.githubusercontent.com/Rodrigotr21/Riesgo-Financiero/main/Logo_ROSTADINA.jpeg"
-    
-    # Intentar cargar el logo
-    try:
-        st.image(LOGO_URL, width=150)
-    except Exception as e:
-        # Mostrar placeholder elegante si falla
-        st.markdown("""
-        <div style="
-            width: 150px; 
-            height: 100px; 
-            margin: 0 auto;
-            background: linear-gradient(135deg, #1E3A8A 0%, #3B82F6 100%);
-            border-radius: 10px;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            color: white;
-        ">
-            <div style="font-size: 2rem;">🏢</div>
-            <div style="font-size: 0.9rem; font-weight: bold;">ROSTADINA</div>
-            <div style="font-size: 0.7rem;">EIRL</div>
-        </div>
-        """, unsafe_allow_html=True)
-        # st.warning(f"Logo no cargado. Usando placeholder.")  # Opcional
-    
-    st.markdown('<div style="font-size: 1.2rem; color: #1E3A8A; font-weight: bold; margin-top: 10px;">ROSTADINA EIRL</div>', unsafe_allow_html=True)
-    st.markdown('</div>', unsafe_allow_html=True)
-
-with col_titulo:
-    st.markdown('<h1 class="main-header">📊 Dashboard de Análisis Financiero</h1>', unsafe_allow_html=True)
-    st.markdown('<div class="rostadina-banner">Análisis de Mercado Peruano - Datos en Tiempo Real</div>', unsafe_allow_html=True)
-
-# ============================================================================
-# BARRA LATERAL SIMPLIFICADA (NO REQUIERE PORTFOLIO)
-# ============================================================================
-
+# Descarga del Benchmark Neto Peruano: Índice General BVL (^SPBLPGPT)
+            with st.spinner("Descargando datos del Índice General BVL..."):
+                sp500_data = yf.download("^SPBLPGPT", start=start_date, end=end_date)
+                if not sp500_data.empty:
+                    st.session_state.sp500_returns = sp500_data['Close'].pct_change().dropna()
+                else:
+                    # Alternativa en caso de caída de Yahoo para el índice local
+                    st.session_state.sp500_returns = st.session_state.returns.mean(axis=1)
 # En el sidebar
 with st.sidebar:
     st.markdown("### 🏢 **ROSTADINA EIRL**")
