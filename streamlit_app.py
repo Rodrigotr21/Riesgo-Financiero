@@ -9,6 +9,16 @@ from datetime import datetime, timedelta
 import warnings
 warnings.filterwarnings('ignore')
 
+from transformers import pipeline
+from deep_translator import GoogleTranslator
+
+# OPTIMIZACIÓN CRÍTICA: Cargar el modelo en caché para que solo se descargue/lea UNA vez
+@st.cache_resource
+def cargar_modelos_ia():
+    analista = pipeline("sentiment-analysis", model="ProsusAI/finbert")
+    traductor = GoogleTranslator(source='auto', target='en')
+    return analista, traductor
+
 # ============================================================================
 # CONFIGURACIÓN INICIAL - DEBE SER LO PRIMERO
 # ============================================================================
@@ -301,6 +311,56 @@ def sistema_alertas_generales():
                     })
     
     return alertas
+
+# ============================================================================
+# OPTIMIZACIÓN Y CACHÉ DE MODELOS DE IA (MOTOR DE RIESGO SEM)
+# ============================================================================
+@st.cache_resource
+def cargar_modelos_ia():
+    """Carga los modelos pesados de IA en memoria RAM una sola vez."""
+    analista = pipeline("sentiment-analysis", model="ProsusAI/finbert")
+    traductor = GoogleTranslator(source='auto', target='en')
+    return analista, traductor
+
+def procesar_riesgo_ia(noticias_fuente):
+    """Procesa los titulares, traduce, calcula sentimiento y extrae el SEM."""
+    analista_ia, traductor = cargar_modelos_ia()
+    scores_por_capa = {"macro": [], "social": [], "micro": []}
+    detalles_noticias = []
+    
+    for item in noticias_fuente:
+        noticia = item["texto"]
+        capa = item["capa"]
+        
+        # Traducción condicional inteligente (evita llamadas si es inglés nativo)
+        texto_analizar = noticia if noticia.isascii() else traductor.translate(noticia)
+        
+        # Inferencia con FinBERT
+        res = analista_ia(texto_analizar)[0]
+        label, score = res['label'], res['score']
+        
+        # Cuantificación matemática del impacto de mercado
+        w = -1 if label == 'negative' else (1 if label == 'positive' else 0)
+        impacto_ponderado = w * score
+        scores_por_capa[capa].append(impacto_ponderado)
+        
+        detalles_noticias.append({
+            "noticia": noticia,
+            "capa": capa.upper(),
+            "sentimiento": label.upper(),
+            "confianza": score
+        })
+        
+    # Cálculo de Sub-Índices por Capas
+    I_macro = np.mean(scores_por_capa["macro"]) if scores_por_capa["macro"] else 0.0
+    I_social = np.mean(scores_por_capa["social"]) if scores_por_capa["social"] else 0.0
+    I_micro = np.mean(scores_por_capa["micro"]) if scores_por_capa["micro"] else 0.0
+    
+    # Combinación Lineal Matricial y Mapeo a Escala [0 - 100]
+    S_raw = (0.40 * I_macro) + (0.35 * I_social) + (0.25 * I_micro)
+    SEM = 50 * (1 - S_raw)
+    
+    return SEM, I_macro, I_social, I_micro, detalles_noticias
 
 # ============================================================================
 # BANNER SUPERIOR CON LOGO ROSTADINA
@@ -600,14 +660,15 @@ else:
 # ============================================================================
 # TABS PRINCIPALES (INDEPENDIENTES DE PORTFOLIO)
 # ============================================================================
-tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
     "📈 Resumen", 
     "📊 Precios", 
     "⚠️ Riesgo",
     "📉 Drawdown", 
     "🔄 Correlaciones", 
-    "🎯 Recomendaciones",
-    "🏢 Portfolio ROSTADINA"  # PORTFOLIO OPCIONAL EN PESTAÑA SEPARADA
+    "🎯 Recomendaciones", 
+    "🏢 Portfolio ROSTADINA",
+    "🤖 Auditoría de Riesgo IA (SEM)"  # <-- Nueva pestaña integrada
 ])
 
 # ============================================================================
@@ -1296,6 +1357,115 @@ with tab7:
                 st.session_state.portfolio_configured = True
                 st.warning("⚠️ Distribución ajustada automáticamente para sumar 100%")
                 st.rerun()
+
+# ============================================================================
+# TAB 8: MOTOR DE AUDITORÍA DE RIESGO CON INTELIGENCIA ARTIFICIAL (SEM)
+# ============================================================================
+with tab8:
+    st.header("🤖 ROSTADINA AI — Especificación Multi-Factor de Riesgo")
+    st.markdown("Evaluación algorítmica tridimensional que procesa simultáneamente variables macroeconómicas globales, microeconómicas corporativas y la coyuntura político-social de Perú.")
+    
+    # 1. Base de Ingesta del Modelo (Titulares actuales)
+    st.subheader("📰 Ingesta Actual de Hechos de Importancia y Noticias")
+    
+    noticias_actuales = [
+        {"texto": "Global copper prices hit record high amid supply chain disruptions.", "capa": "macro"},
+        {"texto": "Federal Reserve signals interest rate cuts for the upcoming quarter.", "capa": "macro"},
+        {"texto": "Nuevos conflictos sociales paralizan por completo el corredor minero en el sur peruano.", "capa": "social"},
+        {"texto": "Incertidumbre política genera ruido institucional en el Congreso de la República.", "capa": "social"},
+        {"texto": "Credicorp reports record high profits and revenue growth for the quarter.", "capa": "micro"}
+    ]
+    
+    with st.expander("📋 Ver fuentes documentales precargadas en el Pipeline"):
+        df_noticias = pd.DataFrame(noticias_actuales)
+        df_noticias.columns = ["Titular / Hecho de Importancia", "Capa Analítica"]
+        st.table(df_noticias)
+        
+    # 2. Ejecución del Core de IA
+    if st.button("🔄 Lanzar Auditoría de Sentimiento & Estrés Colectivo", key="btn_ia_sem"):
+        with st.spinner("Iniciando Transformers... Traduciendo al inglés técnico e infiriendo mediante redes neuronales FinBERT..."):
+            
+            SEM, I_macro, I_social, I_micro, lista_noticias = procesar_riesgo_ia(noticias_actuales)
+            
+            # 3. Despliegue de Resultados Avanzados
+            st.markdown("### 📊 Indicadores Sectoriales Ponderados")
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Sub-Índice Macro (Global - Peso 40%)", f"{I_macro:+.4f}", help="Impacto directo de Commodities y Tasas Internacionales.")
+            col2.metric("Sub-Índice Social (Perú - Peso 35%)", f"{I_social:+.4f}", help="Estabilidad interna, gobernabilidad y Conflictos Mineros.")
+            col3.metric("Sub-Índice Micro (BVL - Peso 25%)", f"{I_micro:+.4f}", help="Salud financiera y utilidades operativas declaradas por las corporaciones.")
+            
+            st.markdown("---")
+            
+            # 4. Sección de Intervalo Puntual y Gráfico de Velocímetro
+            col_grafico, col_consejo = st.columns([2, 3])
+            
+            with col_grafico:
+                st.markdown("<h4 style='text-align: center;'>Ubicación del SEM en la Curva de Estrés</h4>", unsafe_allow_html=True)
+                fig_gauge = go.Figure(go.Indicator(
+                    mode="gauge+number",
+                    value=SEM,
+                    domain={'x': [0, 1], 'y': [0, 1]},
+                    gauge={
+                        'axis': {'range': [0, 100], 'tickwidth': 1, 'tickcolor': "#2c3e50"},
+                        'bar': {'color': "#2c3e50"},
+                        'bgcolor': "white",
+                        'borderwidth': 1,
+                        'bordercolor': "gray",
+                        'steps': [
+                            {'range': [0, 25], 'color': '#2ecc71'},   # Bajo (Verde)
+                            {'range': [25, 50], 'color': '#f1c40f'},  # Moderado (Amarillo)
+                            {'range': [50, 75], 'color': '#e67e22'},  # Alto (Naranja)
+                            {'range': [75, 100], 'color': '#e74c3c'}  # Crítico (Rojo)
+                        ],
+                    }
+                ))
+                fig_gauge.update_layout(height=280, margin=dict(l=30, r=30, t=10, b=10))
+                st.plotly_chart(fig_gauge, use_container_width=True)
+                
+            with col_consejo:
+                st.markdown("<h4>Métrica de Intervalo y Guía de Decisiones Directivas</h4>", unsafe_allow_html=True)
+                if 0 <= SEM <= 25:
+                    st.success("### 🟢 RIESGO COMPRENSIVO BAJO")
+                    consejo = ("**Análisis Metodológico:** Confluencia altamente positiva en variables macro y estabilidad social interna.\n\n"
+                               "**Consejo Corporativo:** Fase de expansión de portafolios. Maximizar la exposición en activos cíclicos y renta variable de la BVL. Se aprueba apalancamiento estratégico para proyectos de inversión de capital (Capex).")
+                elif 25 < SEM <= 50:
+                    st.warning("### 🟡 RIESGO MODERADO RESILIENTE")
+                    consejo = ("**Análisis Metodológico:** Los fundamentos macroeconómicos externos absorben eficientemente el ruido político e institucional local.\n\n"
+                               "**Consejo Corporativo:** Mantener posiciones estructurales vigentes. Se sugiere estructurar coberturas cambiarias parciales (Forward PEN/USD) frente a picos transitorios de volatilidad en la coyuntura interna.")
+                elif 50 < SEM <= 75:
+                    st.error("### 🟠 RIESGO COMPORTAMENTAL ALTO")
+                    consejo = ("**Análisis Metodológico:** El estrés socio-político latente o la corrección de precios de commodities clave comprometen severamente las proyecciones de utilidades microeconómicas.\n\n"
+                               "**Consejo Corporativo:** Reducir agresivamente la duración de portafolios de renta fija. Congelar planes de expansión operativa no esenciales y direccionar flujos excedentes hacia activos defensivos de alta liquidez.")
+                else:
+                    st.error("### 🔴 ALERTA SISTÉMICA / ESTRÉS CRÍTICO")
+                    consejo = ("**Análisis Metodológico:** Quiebre estructural. Shock negativo simultáneo en los mercados internacionales y parálisis operativa y de gobernabilidad a nivel doméstico.\n\n"
+                               "**Consejo Corporativo:** Preservación estricta y absoluta del capital corporativo. Liquidar posiciones de Beta elevado. Refugio de tesorería total en liquidez dura institucional (Dólares soberanos o Treasury Bills de EE.UU.). Activación inmediata del plan de contingencia de liquidez.")
+                
+                st.write(consejo)
+                
+            st.markdown("---")
+            
+            # 5. Desglose detallado del Sentimiento por Titular
+            with st.expander("🔍 Ver Auditoría de Inferencia y Confianza por Titular"):
+                for n in lista_noticias:
+                    badge = "🟢" if n['sentimiento'] == 'POSITIVE' else ("🔴" if n['sentimiento'] == 'NEGATIVE' else "⚪")
+                    st.markdown(f"**{badge} [{n['capa']}]** | {n['noticia']}")
+                    st.caption(f"Inferencia FinBERT: *{n['sentimiento']}* | Confianza del Modelo: **{n['confianza']:.2%}**")
+                    st.markdown("---")
+                    
+            # 6. Marco Técnico Académico (Fórmulas LaTeX en la app)
+            with st.expander("🧮 Ver Especificación de Ecuaciones y Ponderaciones"):
+                st.markdown("El **Score de Estrés de Mercado (SEM)** es un estimador matricial calculado a partir de la siguiente combinación lineal ponderada:")
+                st.latex(r"S_{raw} = 0.40 \cdot I_{macro} + 0.35 \cdot I_{social} + 0.25 \cdot I_{micro}")
+                st.markdown("Posteriormente, el resultado bruto ($S_{raw} \in [-1, 1]$) es normalizado de forma simétrica e invertido para mapear el estrés en una escala corporativa estándar de 0 a 100 puntos:")
+                st.latex(r"SEM = 50 \times (1 - S_{raw})")
+                
+            # 7. Botón Comercial Micro-SaaS
+            st.markdown("<br>", unsafe_allow_html=True)
+            col_b1, col_b2 = st.columns([1, 4])
+            with col_b1:
+                if st.button("📥 Exportar Informe (PDF)", key="btn_pdf_premium"):
+                    st.info("⭐ Función Premium. Conecta con Stripe para habilitar descargas ejecutivas automatizadas para Directorios.")
 
 # ============================================================================
 # PIE DE PÁGINA
