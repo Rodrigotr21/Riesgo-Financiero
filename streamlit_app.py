@@ -27,6 +27,9 @@ def cargar_modelos_ia():
     analista = pipeline("sentiment-analysis", model="ProsusAI/finbert")
     traductor = GoogleTranslator(source='auto', target='en')
     return analista, traductor
+
+def procesar_riesgo_ia(noticias_fuente):
+    analista_ia, traductor = cargar_modelos_ia()
     scores_por_capa = {"macro": [], "social": [], "micro": []}
     detalles_noticias = []
     
@@ -328,7 +331,7 @@ def sistema_alertas_generales():
             })
     
 # SELECCIÓN NETAMENTE MERCADO PERUANO
-    tickers_por_defecto = ["BAP", "SCCO", "BVN", "IFS", "ALICORC1.LM", "CREDIC1.LM"]
+    tickers_por_defecto = ["BAP", "SCCO", "BVN", "IFS", "ALICORC1.LM"]
     
     tickers_input = st.text_input(
         "Introduce los Tickers separados por comas (Ejemplo: Corporación Aceros Arequipa, Alicorp, Volcan, Buenaventura):",
