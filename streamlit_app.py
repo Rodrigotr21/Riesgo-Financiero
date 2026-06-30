@@ -1,4 +1,8 @@
 # dashboard_riesgo_financiero_peru.py
+# ============================================================================
+# PARTE 1 DE 10: CONFIGURACIÓN INICIAL E IMPORTS
+# ============================================================================
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -13,7 +17,7 @@ from transformers import pipeline
 from deep_translator import GoogleTranslator
 
 # ============================================================================
-# 1. CONFIGURACIÓN INICIAL (DEBE SER LA PRIMERA INSTRUCCIÓN DE STREAMLIT)
+# CONFIGURACIÓN INICIAL - ESTA DEBE SER ESTRICTAMENTE LA LÍNEA ACTIVA NÚMERO 1
 # ============================================================================
 st.set_page_config(
     page_title="Dashboard de Riesgo Financiero - ROSTADINA EIRL",
@@ -22,53 +26,10 @@ st.set_page_config(
 )
 
 # ============================================================================
-# 2. OPTIMIZACIÓN Y CACHÉ DE MODELOS DE IA (MOTOR DE RIESGO SEM)
+# PARTE 2 DE 10: INICIALIZACIÓN SESSION_STATE Y FUNCIONES AUXILIARES
 # ============================================================================
-@st.cache_resource
-def cargar_modelos_ia():
-    """Carga los modelos pesados de IA en memoria RAM una sola vez."""
-    analista = pipeline("sentiment-analysis", model="ProsusAI/finbert")
-    traductor = GoogleTranslator(source='auto', target='en')
-    return analista, traductor
 
-def procesar_riesgo_ia(noticias_fuente):
-    """Procesa los titulares, traduce, calcula sentimiento y extrae el SEM."""
-    analista_ia, traductor = cargar_modelos_ia()
-    scores_por_capa = {"macro": [], "social": [], "micro": []}
-    detalles_noticias = []
-    
-    for item in noticias_fuente:
-        noticia = item["texto"]
-        capa = item["capa"]
-        
-        texto_analizar = noticia if noticia.isascii() else traductor.translate(noticia)
-        
-        res = analista_ia(texto_analizar)[0]
-        label, score = res['label'], res['score']
-        
-        w = -1 if label == 'negative' else (1 if label == 'positive' else 0)
-        impacto_ponderado = w * score
-        scores_por_capa[capa].append(impacto_ponderado)
-        
-        detalles_noticias.append({
-            "noticia": noticia,
-            "capa": capa.upper(),
-            "sentimiento": label.upper(),
-            "confianza": score
-        })
-        
-    I_macro = np.mean(scores_por_capa["macro"]) if scores_por_capa["macro"] else 0.0
-    I_social = np.mean(scores_por_capa["social"]) if scores_por_capa["social"] else 0.0
-    I_micro = np.mean(scores_por_capa["micro"]) if scores_por_capa["micro"] else 0.0
-    
-    S_raw = (0.40 * I_macro) + (0.35 * I_social) + (0.25 * I_micro)
-    SEM = 50 * (1 - S_raw)
-    
-    return SEM, I_macro, I_social, I_micro, detalles_noticias
-
-# ============================================================================
-# 3. INICIALIZAR SESSION_STATE - CRÍTICO PARA STREAMLIT
-# ============================================================================
+# INICIALIZAR SESSION_STATE - CRÍTICO PARA STREAMLIT
 if 'data_loaded' not in st.session_state:
     st.session_state.data_loaded = False
 if 'close_prices' not in st.session_state:
@@ -77,6 +38,8 @@ if 'returns' not in st.session_state:
     st.session_state.returns = pd.DataFrame()
 if 'sp500_returns' not in st.session_state:
     st.session_state.sp500_returns = pd.Series()
+
+# Estado para portfolio
 if 'portfolio_configured' not in st.session_state:
     st.session_state.portfolio_configured = False
 if 'portfolio_dist' not in st.session_state:
@@ -89,352 +52,1399 @@ if 'selected_sector' not in st.session_state:
     st.session_state.selected_sector = "Todos"
 
 # ============================================================================
-# 4. ESTILOS CSS PERSONALIZADOS
+# FUNCIONES AUXILIARES
+# ============================================================================
+
+def descargar_datos_simples(tickers):
+    """Descarga datos de forma simple"""
+    try:
+        tickers_validos = []
+        tickers_no_disponibles = []
+        
+        for ticker in tickers:
+            try:
+                data_test = yf.download(ticker, period="5d", progress=False)
+                if not data_test.empty and 'Close' in data_test.columns:
+                    tickers_validos.append(ticker)
+                else:
+                    tickers_no_disponibles.append(ticker)
+            except Exception as e:
+                tickers_no_disponibles.append(ticker)
+        
+        if tickers_no_disponibles:
+            st.sidebar.warning(f"Tickers no disponibles: {', '.join(tickers_no_disponibles)}")
+        
+        if not tickers_validos:
+            st.error("Ningún ticker está disponible. Por favor selecciona otros.")
+            return pd.DataFrame()
+        
+        data = yf.download(
+            tickers_validos,
+            start=st.session_state.fecha_inicio,
+            end=st.session_state.fecha_fin,
+            progress=False,
+            group_by='ticker'
+        )
+        
+        if data.empty:
+            return pd.DataFrame()
+        
+        if data.columns.nlevels > 1:
+            close_prices = data.xs('Close', axis=1, level=1)
+        else:
+            close_prices = data[['Close']] if 'Close' in data.columns else data
+        
+        return close_prices.dropna(how='all')
+    
+    except Exception as e:
+        st.error(f"Error descargando datos: {str(e)[:100]}")
+        return pd.DataFrame()
+
+# ============================================================================
+# PARTE 3 DE 10: FUNCIONES AUXILIARES (CONTINUACIÓN)
+# ============================================================================
+
+def calcular_drawdown(precios):
+    """Calcula drawdown"""
+    try:
+        ret_acum = (1 + precios.pct_change().fillna(0)).cumprod()
+        max_rodante = ret_acum.expanding().max()
+        drawdown = (ret_acum - max_rodante) / max_rodante
+        return drawdown
+    except:
+        return pd.Series()
+
+def calcular_metricas_portfolio():
+    """Calcula métricas del portfolio ROSTADINA"""
+    if not st.session_state.data_loaded or not st.session_state.portfolio_configured:
+        return None
+    
+    try:
+        returns = st.session_state.returns
+        portfolio_dist = st.session_state.portfolio_dist
+        capital_total = st.session_state.capital_total
+        
+        if not portfolio_dist or len(portfolio_dist) != len(returns.columns):
+            return None
+        
+        portfolio_returns = pd.Series(index=returns.index, dtype=float)
+        
+        for empresa, peso in portfolio_dist.items():
+            if empresa in returns.columns:
+                peso_decimal = peso / 100
+                portfolio_returns = portfolio_returns.add(returns[empresa] * peso_decimal, fill_value=0)
+        
+        vol_anual = portfolio_returns.std() * np.sqrt(252) * 100
+        ret_anual = ((1 + portfolio_returns.mean())**252 - 1) * 100
+        var_95 = portfolio_returns.quantile(0.05) * 100
+        
+        sharpe = np.nan
+        if vol_anual > 0:
+            sharpe = (ret_anual/100 - st.session_state.tasa_riesgo) / (vol_anual/100)
+        
+        max_perdida = portfolio_returns.min() * 100
+        var_absoluto = (capital_total * abs(var_95)) / 100
+        
+        return {
+            "vol_anual": vol_anual,
+            "ret_anual": ret_anual,
+            "var_95": var_95,
+            "sharpe": sharpe,
+            "max_perdida": max_perdida,
+            "var_absoluto": var_absoluto,
+            "portfolio_returns": portfolio_returns,
+            "capital_total": capital_total
+        }
+    
+    except Exception as e:
+        st.error(f"Error calculando métricas del portfolio: {e}")
+        return None
+
+def sistema_alertas_generales():
+    """Sistema de alertas automáticas generales"""
+    if not st.session_state.data_loaded:
+        return []
+    
+    alertas = []
+    returns = st.session_state.returns
+    close_prices = st.session_state.close_prices
+    
+    UMBRAL_VOL_ALTA = 35
+    UMBRAL_VOL_MUY_ALTA = 45
+    UMBRAL_DRAWDOWN = -0.20
+    UMBRAL_CORRELACION = 0.85
+    
+    # 1. Alertas por volatilidad
+    for empresa in returns.columns:
+        vol_actual = returns[empresa].std() * np.sqrt(252) * 100
+        
+        if vol_actual > UMBRAL_VOL_MUY_ALTA:
+            alertas.append({
+                "nivel": "🔴 CRÍTICO",
+                "mensaje": f"<strong>{empresa}</strong>: Volatilidad extremadamente alta ({vol_actual:.1f}%)",
+                "recomendacion": "Considerar reducir posición o implementar cobertura"
+            })
+        elif vol_actual > UMBRAL_VOL_ALTA:
+            alertas.append({
+                "nivel": "🟡 ADVERTENCIA",
+                "mensaje": f"<strong>{empresa}</strong>: Volatilidad elevada ({vol_actual:.1f}%)",
+                "recomendacion": "Monitorear de cerca"
+            })
+    
+    # 2. Alertas por drawdown
+    for empresa in close_prices.columns:
+        dd = calcular_drawdown(close_prices[empresa])
+        if not dd.empty and dd.min() < UMBRAL_DRAWDOWN:
+            alertas.append({
+                "nivel": "🔴 CRÍTICO",
+                "mensaje": f"<strong>{empresa}</strong>: Drawdown histórico > 20% ({dd.min()*100:.1f}%)",
+                "recomendacion": "Revisar estrategia de salida"
+            })
+    
+    # 3. Alertas por correlación excesiva
+    if len(returns.columns) > 1:
+        corr_matrix = returns.corr()
+        for i in range(len(corr_matrix.columns)):
+            for j in range(i+1, len(corr_matrix.columns)):
+                if abs(corr_matrix.iloc[i, j]) > UMBRAL_CORRELACION:
+                    alertas.append({
+                        "nivel": "🟡 ADVERTENCIA",
+                        "mensaje": f"Alta correlación entre <strong>{corr_matrix.columns[i]}</strong> y <strong>{corr_matrix.columns[j]}</strong> ({corr_matrix.iloc[i, j]:.2f})",
+                        "recomendacion": "Considerar diversificar con activos no correlacionados"
+                    })
+    
+    return alertas
+
+# ============================================================================
+# PARTE 4 DE 10: MOTOR DE INTELIGENCIA ARTIFICIAL Y ESTILOS CSS
+# ============================================================================
+
+# ============================================================================
+# OPTIMIZACIÓN Y CACHÉ DE MODELOS DE IA (MOTOR DE RIESGO SEM)
+# ============================================================================
+@st.cache_resource
+def cargar_modelos_ia():
+    """Carga los modelos pesados de IA en memoria RAM una sola vez."""
+    analista = pipeline("sentiment-analysis", model="ProsusAI/finbert")
+    traductor = GoogleTranslator(source='auto', target='en')
+    return analista, traductor
+
+def procesar_riesgo_ia(noticias_fuente):
+    """
+    Procesa los titulares, traduce, calcula sentimiento y extrae el SEM.
+    Esta función está correctamente definida FUERA del decorador @st.cache_resource.
+    """
+    analista_ia, traductor = cargar_modelos_ia()
+    scores_por_capa = {"macro": [], "social": [], "micro": []}
+    detalles_noticias = []
+    
+    for item in noticias_fuente:
+        noticia = item["texto"]
+        capa = item["capa"]
+        
+        # Traducción condicional inteligente
+        texto_analizar = noticia if noticia.isascii() else traductor.translate(noticia)
+        
+        # Inferencia con FinBERT
+        res = analista_ia(texto_analizar)[0]
+        label, score = res['label'], res['score']
+        
+        # Cuantificación matemática del impacto de mercado
+        w = -1 if label == 'negative' else (1 if label == 'positive' else 0)
+        impacto_ponderado = w * score
+        scores_por_capa[capa].append(impacto_ponderado)
+        
+        detalles_noticias.append({
+            "noticia": noticia,
+            "capa": capa.upper(),
+            "sentimiento": label.upper(),
+            "confianza": score
+        })
+        
+    # Cálculo de Sub-Índices por Capas
+    I_macro = np.mean(scores_por_capa["macro"]) if scores_por_capa["macro"] else 0.0
+    I_social = np.mean(scores_por_capa["social"]) if scores_por_capa["social"] else 0.0
+    I_micro = np.mean(scores_por_capa["micro"]) if scores_por_capa["micro"] else 0.0
+    
+    # Combinación Lineal Matricial y Mapeo a Escala [0 - 100]
+    S_raw = (0.40 * I_macro) + (0.35 * I_social) + (0.25 * I_micro)
+    SEM = 50 * (1 - S_raw)
+    
+    return SEM, I_macro, I_social, I_micro, detalles_noticias
+
+# ============================================================================
+# ESTILOS CSS PERSONALIZADOS PARA ROSTADINA
 # ============================================================================
 st.markdown("""
 <style>
-    .main-header { font-size: 2.5rem; color: #1E3A8A; text-align: center; margin-bottom: 1rem; }
-    .sub-header { font-size: 1.5rem; color: #3B82F6; margin-top: 2rem; margin-bottom: 1rem; }
-    .metric-box { background-color: #f8f9fa; padding: 15px; border-radius: 10px; border-left: 5px solid #3B82F6; margin-bottom: 10px; }
-    .rostadina-banner { background: linear-gradient(135deg, #1E3A8A 0%, #3B82F6 100%); padding: 1rem; border-radius: 10px; color: white; text-align: center; margin-bottom: 2rem; }
-    .alert-box { background-color: #2c3e50; border-left: 5px solid #e74c3c; padding: 15px; border-radius: 5px; margin-bottom: 10px; color: white !important; }
-    .alert-box strong { color: #ecf0f1 !important; }
-    .alert-box em { color: #bdc3c7 !important; }
-    .success-box { background-color: #27ae60; border-left: 5px solid #2ecc71; padding: 15px; border-radius: 5px; margin-bottom: 10px; color: white !important; }
-    .success-box strong { color: white !important; }
-    .portfolio-box { background-color: #1E3A8A; border: 2px solid #3B82F6; border-radius: 10px; padding: 20px; margin-bottom: 20px; color: white !important; }
-    .portfolio-box h3 { color: white !important; }
-    .portfolio-box p { color: #ecf0f1 !important; }
-    .warning-box { background-color: #f39c12; border-left: 5px solid #e67e22; padding: 15px; border-radius: 5px; margin-bottom: 10px; color: #2c3e50 !important; }
-    .warning-box strong { color: #2c3e50 !important; }
+    .main-header {
+        font-size: 2.5rem;
+        color: #1E3A8A;
+        text-align: center;
+        margin-bottom: 1rem;
+    }
+    .sub-header {
+        font-size: 1.5rem;
+        color: #3B82F6;
+        margin-top: 2rem;
+        margin-bottom: 1rem;
+    }
+    .metric-box {
+        background-color: #f8f9fa;
+        padding: 15px;
+        border-radius: 10px;
+        border-left: 5px solid #3B82F6;
+        margin-bottom: 10px;
+    }
+    .rostadina-banner {
+        background: linear-gradient(135deg, #1E3A8A 0%, #3B82F6 100%);
+        padding: 1rem;
+        border-radius: 10px;
+        color: white;
+        text-align: center;
+        margin-bottom: 2rem;
+    }
+    .alert-box {
+        background-color: #2c3e50;
+        border-left: 5px solid #e74c3c;
+        padding: 15px;
+        border-radius: 5px;
+        margin-bottom: 10px;
+        color: white !important;
+    }
+    .alert-box strong {
+        color: #ecf0f1 !important;
+    }
+    .alert-box em {
+        color: #bdc3c7 !important;
+    }
+    .success-box {
+        background-color: #27ae60;
+        border-left: 5px solid #2ecc71;
+        padding: 15px;
+        border-radius: 5px;
+        margin-bottom: 10px;
+        color: white !important;
+    }
+    .success-box strong {
+        color: white !important;
+    }
+    .portfolio-box {
+        background-color: #1E3A8A;
+        border: 2px solid #3B82F6;
+        border-radius: 10px;
+        padding: 20px;
+        margin-bottom: 20px;
+        color: white !important;
+    }
+    .portfolio-box h3 {
+        color: white !important;
+    }
+    .portfolio-box p {
+        color: #ecf0f1 !important;
+    }
+    .warning-box {
+        background-color: #f39c12;
+        border-left: 5px solid #e67e22;
+        padding: 15px;
+        border-radius: 5px;
+        margin-bottom: 10px;
+        color: #2c3e50 !important;
+    }
+    .warning-box strong {
+        color: #2c3e50 !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
 # ============================================================================
-# 5. BARRA LATERAL (SIDEBAR) - CONTROL DE ENTRADAS Y TICKERS DEL PERÚ
+# PARTE 5 DE 10: BANNER SUPERIOR Y BARRA LATERAL
 # ============================================================================
-st.sidebar.title("Configuración de Mercado")
 
-# Sector Económico de la BVL para filtrar visualizaciones
-sector_seleccionado = st.sidebar.selectbox(
-    "Sector Económico Local:",
-    ["Todos", "Financiero", "Minero", "Consumo/Industrial"]
-)
-st.session_state.selected_sector = sector_seleccionado
+# URL del logo ROSTADINA
+LOGO_URL = "https://raw.githubusercontent.com/Rodrigotr21/Riesgo-Financiero/main/Logo_ROSTADINA.jpeg"
 
-# Tickers por defecto purgados de activos extranjeros - 100% Bandera Peruana
-# BAP (Credicorp), SCCO (Southern Copper), BVN (Buenaventura), IFS (Intercorp Financial), ALICORC1.LM (Alicorp), CREDIC1.LM (Banco de Crédito)
-tickers_por_defecto = ["BAP", "SCCO", "BVN", "IFS", "ALICORC1.LM"]
+# Banner Superior
+col_logo, col_titulo = st.columns([1, 3])
 
-tickers_input = st.sidebar.text_input(
-    "Tickers de la BVL / ADRs Peruanos (Separados por comas):",
-    value=", ".join(tickers_por_defecto)
-)
+with col_logo:
+    st.markdown('<div style="text-align: center;">', unsafe_allow_html=True)
+    try:
+        st.image(LOGO_URL, width=150)
+    except Exception as e:
+        st.markdown("""
+        <div style="
+            width: 150px; 
+            height: 100px; 
+            margin: 0 auto;
+            background: linear-gradient(135deg, #1E3A8A 0%, #3B82F6 100%);
+            border-radius: 10px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            color: white;
+        ">
+            <div style="font-size: 2rem;">🏢</div>
+            <div style="font-size: 0.9rem; font-weight: bold;">ROSTADINA</div>
+            <div style="font-size: 0.7rem;">EIRL</div>
+        </div>
+        """, unsafe_allow_html=True)
+    st.markdown('<div style="font-size: 1.2rem; color: #1E3A8A; font-weight: bold; margin-top: 10px;">ROSTADINA EIRL</div>', unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
 
-# Procesar y limpiar la lista de tickers ingresados
-lista_tickers = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
-st.session_state.selected_tickers = lista_tickers
-
-# Configuración de horizontes temporales
-dias_historicos = st.sidebar.slider("Historial de Análisis (Días):", 30, 365 * 5, 365)
-end_date = datetime.now()
-start_date = end_date - timedelta(days=dias_historicos)
+with col_titulo:
+    st.markdown('<h1 class="main-header">📊 Dashboard de Análisis Financiero</h1>', unsafe_allow_html=True)
+    st.markdown('<div class="rostadina-banner">Análisis de Mercado Peruano - Datos en Tiempo Real</div>', unsafe_allow_html=True)
 
 # ============================================================================
-# 6. MOTOR DE CONSULTA DE APIS (YAHOO FINANCE) Y PROCESAMIENTO MATEMÁTICO
+# BARRA LATERAL - SOLO ACTIVOS PERUANOS
 # ============================================================================
-if st.sidebar.button("🔄 Ejecutar Análisis de Riesgo", key="btn_cargar_datos"):
-    if not lista_tickers:
-        st.sidebar.error("❌ Por favor, introduce al menos un ticker válido.")
-    else:
-        with st.spinner("Conectando con Yahoo Finance y descargando activos peruanos..."):
+with st.sidebar:
+    st.markdown("### 🏢 **ROSTADINA EIRL**")
+    st.markdown("---")
+    
+    st.markdown('<div style="text-align: center; margin-bottom: 20px;">', unsafe_allow_html=True)
+    try:
+        st.image(LOGO_URL, width=70)
+    except:
+        st.markdown('<div style="font-size: 2rem; margin-bottom: 5px;">🏢</div>', unsafe_allow_html=True)
+    st.markdown('<div style="font-size: 0.9rem; color: #1E3A8A; font-weight: bold;">ROSTADINA EIRL</div>', unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+    
+    st.markdown("### ⚙️ Configuración General")
+    
+    fecha_inicio = st.date_input(
+        "Fecha de inicio",
+        value=datetime(2020, 1, 1)
+    )
+    
+    fecha_fin = st.date_input(
+        "Fecha de fin",
+        value=datetime.today()
+    )
+    
+    # LISTA COMPLETA DE EMPRESAS PERUANAS (SIN S&P 500)
+    st.markdown("### 📊 Empresas Peruanas")
+    
+    empresas_peruanas = {
+        "Todos": ["BAP", "SCCO", "BVN", "IFS", "CREDITC1", "INTERBC1", 
+                 "NEXA", "SID", "RIMC", "CORAREC1", "ALICORC1", 
+                 "ENGIEC1", "LUSURC1", "CVERDEC1", "NESTLEP", 
+                 "VOLCABC1", "CASAGRC1"],
+        "Financieras": ["BAP", "IFS", "CREDITC1", "INTERBC1"],
+        "Minera": ["SCCO", "BVN", "NEXA", "SID", "RIMC"],
+        "Industrial": ["CORAREC1", "ALICORC1"],
+        "Energía": ["ENGIEC1", "LUSURC1"],
+        "Consumo": ["CVERDEC1", "NESTLEP"],
+        "Diversas": ["VOLCABC1", "CASAGRC1"]
+    }
+    
+    sector_seleccionado = st.selectbox(
+        "Filtrar por sector:",
+        list(empresas_peruanas.keys()),
+        index=0
+    )
+    
+    opciones_tickers = empresas_peruanas[sector_seleccionado]
+    
+    default_tickers = []
+    for ticker in st.session_state.selected_tickers:
+        if ticker in opciones_tickers:
+            default_tickers.append(ticker)
+    
+    if not default_tickers and opciones_tickers:
+        default_tickers = opciones_tickers[:min(3, len(opciones_tickers))]
+    
+    tickers_seleccionados = st.multiselect(
+        "Selecciona empresas para análisis:",
+        opciones_tickers,
+        default=default_tickers
+    )
+    
+    st.session_state.selected_tickers = tickers_seleccionados
+    st.session_state.selected_sector = sector_seleccionado
+    
+    if not tickers_seleccionados:
+        st.warning("Selecciona al menos una empresa")
+        st.stop()
+    
+    st.markdown("### 🎯 Parámetros de Riesgo")
+    nivel_confianza = st.slider("Confianza VaR (%)", 90, 99, 95)
+    tasa_riesgo = st.slider("Tasa libre riesgo (%)", 1.0, 10.0, 4.0) / 100
+    
+    if st.button("📥 Cargar Datos de Mercado", type="primary", use_container_width=True):
+        st.session_state.tickers = tickers_seleccionados
+        st.session_state.fecha_inicio = fecha_inicio
+        st.session_state.fecha_fin = fecha_fin
+        st.session_state.nivel_confianza = nivel_confianza
+        st.session_state.tasa_riesgo = tasa_riesgo
+        
+        st.session_state.data_loaded = False
+        st.session_state.portfolio_configured = False
+        st.rerun()
+
+# ============================================================================
+# PARTE 6 DE 10: PROCESAMIENTO DE DATOS Y GUÍA RÁPIDA
+# ============================================================================
+
+# ============================================================================
+# PROCESAMIENTO DE DATOS (INDEPENDIENTE DE PORTFOLIO)
+# ============================================================================
+if 'tickers' in st.session_state and st.session_state.tickers:
+    if not st.session_state.data_loaded:
+        with st.spinner("Descargando datos de mercado..."):
+            close_prices = descargar_datos_simples(st.session_state.tickers)
+            
+            if close_prices.empty:
+                st.error("No se pudieron descargar datos. Verifica los tickers y tu conexión a internet.")
+                st.stop()
+            
+            returns = close_prices.pct_change().dropna()
+            
+            if returns.empty:
+                st.error("No hay suficientes datos para análisis.")
+                st.stop()
+            
+            # BENCHMARK PERUANO: Índice General BVL (NO S&P 500)
             try:
-                # Descarga masiva de los precios de cierre de los activos locales
-                raw_data = yf.download(lista_tickers, start=start_date, end=end_date)
+                bvl_data = yf.download('^SPBLPGPT', 
+                                      start=st.session_state.fecha_inicio,
+                                      end=st.session_state.fecha_fin,
+                                      progress=False)
                 
-                if raw_data.empty:
-                    st.sidebar.error("❌ No se encontraron datos para los tickers ingresados.")
-                else:
-                    # Estructurar DataFrame en base a cierres ajustados o normales
-                    if 'Adj Close' in raw_data and not raw_data['Adj Close'].empty:
-                        df_close = raw_data['Adj Close']
+                if not bvl_data.empty:
+                    if 'Close' in bvl_data.columns:
+                        bvl_close = bvl_data['Close']
                     else:
-                        df_close = raw_data['Close']
+                        bvl_close = bvl_data.iloc[:, 0]
                     
-                    # Manejar caso de que se consulte un solo ticker (Yahoo Finance cambia la forma del DataFrame)
-                    if isinstance(df_close, pd.Series):
-                        df_close = df_close.to_frame(name=lista_tickers[0])
-                        
-                    # Limpieza de nulos por desalineación de días festivos en la BVL
-                    df_close = df_close.ffill().bfill()
-                    
-                    # Calcular retornos porcentuales diarios
-                    df_returns = df_close.pct_change().dropna()
-                    
-                    # Guardar en el Session State global para persistencia entre pestañas
-                    st.session_state.close_prices = df_close
-                    st.session_state.returns = df_returns
-                    st.session_state.data_loaded = True
-                    
-            except Exception as e:
-                st.sidebar.error(f"❌ Error al procesar datos financieros: {str(e)}")
-        
-        # Descarga del Benchmark Neto Peruano: Índice General BVL (^SPBLPGPT)
-        with st.spinner("Descargando datos del Índice General BVL..."):
-            try:
-                sp500_data = yf.download("^SPBLPGPT", start=start_date, end=end_date)
-                if not sp500_data.empty:
-                    if 'Adj Close' in sp500_data:
-                        bench_series = sp500_data['Adj Close']
-                    else:
-                        bench_series = sp500_data['Close']
-                    st.session_state.sp500_returns = bench_series.pct_change().dropna()
+                    bvl_returns = bvl_close.pct_change().dropna()
                 else:
-                    # En caso de caída de Yahoo o falta de datos del índice local, se usa el promedio del mercado
-                    if not st.session_state.returns.empty:
-                        st.session_state.sp500_returns = st.session_state.returns.mean(axis=1)
-            except Exception:
-                # Fallback de seguridad ante desconexiones de la API
-                if not st.session_state.returns.empty:
-                    st.session_state.sp500_returns = st.session_state.returns.mean(axis=1)
+                    # Alternativa si no hay datos del índice BVL
+                    bvl_returns = returns.mean(axis=1)
+            except:
+                bvl_returns = pd.Series()
+            
+            st.session_state.close_prices = close_prices
+            st.session_state.returns = returns
+            st.session_state.sp500_returns = bvl_returns  # Ahora contiene BVL
+            st.session_state.data_loaded = True
+            
+            st.success(f"✅ Datos de mercado cargados: {len(close_prices)} días, {len(close_prices.columns)} empresas")
 
-# Mensaje de estado en el Sidebar
-if st.session_state.data_loaded:
-    st.sidebar.success(f"📊 Base de datos activa: {len(st.session_state.selected_tickers)} activos.")
+# ============================================================================
+# VERIFICAR SI HAY DATOS DE MERCADO
+# ============================================================================
+if not st.session_state.data_loaded:
+    st.info("👈 **Selecciona empresas y haz clic en 'Cargar Datos de Mercado' para comenzar**")
+    st.stop()
+
+# Obtener datos
+close_prices = st.session_state.close_prices
+returns = st.session_state.returns
+
+# ============================================================================
+# GUÍA RÁPIDA DE USUARIO
+# ============================================================================
+with st.expander("📚 **GUÍA RÁPIDA DE USO - ROSTADINA EIRL**", expanded=True):
+    st.markdown("""
+    ### 🎯 **OBJETIVO DEL DASHBOARD**
+    Esta herramienta permite analizar el riesgo financiero de empresas peruanas listadas en bolsa 
+    y configurar portfolios de inversión personalizados para **ROSTADINA EIRL**.
+    
+    **Nota**: Estos datos son de actualización diaria, es decir, los precios a ver no son de la última hora, sino de la hora
+    de cierre del día anterior.
+    
+    ### 📋 **PASOS RECOMENDADOS:**
+    
+    1. **📊 SELECCIÓN DE EMPRESAS** (Barra lateral)
+       - Selecciona el sector y las empresas a analizar
+       - Haz clic en **"Cargar Datos de Mercado"**
+    
+    2. **📈 ANÁLISIS GENERAL** (Pestañas 1-6)
+       - **Resumen**: Métricas clave del mercado
+       - **Precios**: Evolución histórica por empresa
+       - **Riesgo**: Comparativa detallada de métricas
+       - **Drawdown**: Máximas caídas históricas
+       - **Correlaciones**: Diversificación del portfolio
+       - **Recomendaciones**: Estrategias por perfil
+    
+    3. **🤖 AUDITORÍA DE RIESGO IA** (Pestaña 8)
+       - Motor SEM que analiza noticias en tiempo real
+       - Procesa factores Macro, Social y Micro
+       - Genera recomendaciones directivas automatizadas
+    
+    ### ⚠️ **CONSIDERACIONES IMPORTANTES:**
+    - Los datos provienen de **Yahoo Finance** en tiempo real
+    - Las métricas de riesgo son **estimaciones históricas**
+    - **No constituyen recomendación de inversión**
+    - Consulta con tu asesor financiero antes de tomar decisiones
+    """)
+    
+    col_info1, col_info2 = st.columns(2)
+    with col_info1:
+        st.markdown("""
+        ### 📞 **CONTACTO Y SOPORTE**
+        **Linkedin: ROSTADINA EIRL**  
+        📧 rodrigoluisyauliblas@icloud.com  
+        📱 +51 989911582  
+        """)
+    
+    with col_info2:
+        st.markdown("""
+        ### 🕒 **ACTUALIZACIÓN DE DATOS**
+        - Datos actualizados diariamente
+        - Histórico desde 2020
+        - Horario de actualización: 9:00 AM (PET)
+        - Última actualización: {}
+        """.format(datetime.now().strftime("%Y-%m-%d %H:%M")))
+
+# ============================================================================
+# PARTE 7 DE 10: SISTEMA DE ALERTAS Y TABS
+# ============================================================================
+
+# ============================================================================
+# SISTEMA DE ALERTAS GENERALES
+# ============================================================================
+alertas = sistema_alertas_generales()
+
+if alertas:
+    st.markdown("### ⚠️ **Alertas del Mercado**")
+    
+    alertas_criticas = [a for a in alertas if a["nivel"] == "🔴 CRÍTICO"]
+    alertas_advertencia = [a for a in alertas if a["nivel"] == "🟡 ADVERTENCIA"]
+    
+    if alertas_criticas:
+        for alerta in alertas_criticas:
+            st.markdown(f"""
+            <div class="alert-box">
+                <strong>{alerta["nivel"]}</strong><br>
+                {alerta["mensaje"]}<br>
+                <em>Recomendación: {alerta["recomendacion"]}</em>
+            </div>
+            """, unsafe_allow_html=True)
+    
+    if alertas_advertencia:
+        for alerta in alertas_advertencia:
+            st.markdown(f"""
+            <div class="alert-box">
+                <strong>{alerta["nivel"]}</strong><br>
+                {alerta["mensaje"]}<br>
+                <em>Recomendación: {alerta["recomendacion"]}</em>
+            </div>
+            """, unsafe_allow_html=True)
 else:
-    st.sidebar.info("💡 Haz clic en 'Ejecutar Análisis de Riesgo' para calcular las métricas.")
+    st.markdown(f"""
+    <div class="success-box">
+        <strong>✅ ESTADO DEL MERCADO ESTABLE</strong><br>
+        No se detectaron alertas críticas en las empresas seleccionadas
+    </div>
+    """, unsafe_allow_html=True)
 
 # ============================================================================
-# 7. ASIGNACIÓN DINÁMICA DE SECTORES (Mapeo Forense para los Activos del Perú)
+# TABS PRINCIPALES (8 PESTAÑAS - INCLUYE IA)
 # ============================================================================
-def obtener_sector_peru(ticker):
-    ticker_upper = ticker.upper()
-    if "BAP" in ticker_upper or "IFS" in ticker_upper or "CREDIC1" in ticker_upper or "BBVAC1" in ticker_upper:
-        return "Financiero"
-    elif "SCCO" in ticker_upper or "BVN" in ticker_upper or "VOLCABC1" in ticker_upper or "SPCC" in ticker_upper:
-        return "Minero"
-    else:
-        return "Consumo/Industrial"
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
+    "📈 Resumen", 
+    "📊 Precios", 
+    "⚠️ Riesgo",
+    "📉 Drawdown", 
+    "🔄 Correlaciones", 
+    "🎯 Recomendaciones", 
+    "🏢 Portfolio ROSTADINA",
+    "🤖 Auditoría de Riesgo IA (SEM)"
+])
 
 # ============================================================================
-# 8. RENDERIZADO DE PESTAÑAS Y DASHBOARD PRINCIPAL
+# PARTE 8 DE 10: TABS 1-4 (RESUMEN, PRECIOS, RIESGO, DRAWDOWN)
 # ============================================================================
-if st.session_state.data_loaded:
-    # Creación de las 8 pestañas (incluyendo la nueva de IA)
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
-        "📈 Resumen", 
-        "📊 Precios", 
-        "⚠️ Riesgo",
-        "📉 Drawdown", 
-        "🔄 Correlaciones", 
-        "🎯 Recomendaciones", 
-        "🏢 Portfolio ROSTADINA",
-        "🤖 Auditoría de Riesgo IA (SEM)"
-    ])
 
-    df_close = st.session_state.close_prices
-    df_returns = st.session_state.returns
-    bench_returns = st.session_state.sp500_returns
-
-    # --- TAB 1: RESUMEN ---
-    with tab1:
-        st.header("📈 Resumen Ejecutivo del Mercado (Perú)")
-        st.markdown("Métricas clave de los activos seleccionados.")
+# ============================================================================
+# TAB 1: RESUMEN GENERAL
+# ============================================================================
+with tab1:
+    st.header("📊 Resumen Ejecutivo del Mercado")
+    
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        vol = returns.std().mean() * np.sqrt(252) * 100
+        st.metric("Volatilidad Promedio", f"{vol:.1f}%", 
+                 help="Volatilidad anualizada promedio de las empresas seleccionadas")
+    
+    with col2:
+        ret = ((1 + returns.mean())**252 - 1).mean() * 100
+        st.metric("Retorno Promedio Anual", f"{ret:.1f}%",
+                 help="Retorno anualizado promedio esperado")
+    
+    with col3:
+        var = returns.quantile(0.05).mean() * 100
+        st.metric("VaR 95% Diario", f"{abs(var):.1f}%",
+                 help="Pérdida máxima diaria con 95% confianza (promedio)")
+    
+    with col4:
+        sharpe = ((returns.mean() * 252 - st.session_state.tasa_riesgo) / 
+                 (returns.std() * np.sqrt(252))).mean()
+        st.metric("Sharpe Ratio Promedio", f"{sharpe:.2f}",
+                 help="Retorno ajustado por riesgo (mayor es mejor)")
+    
+    st.markdown("---")
+    
+    st.subheader("🏆 Ranking de Empresas")
+    
+    col_r1, col_r2, col_r3 = st.columns(3)
+    
+    with col_r1:
+        st.markdown("**📈 Mejor Retorno Anual**")
+        retornos_anuales = ((1 + returns.mean())**252 - 1) * 100
+        top_retorno = retornos_anuales.sort_values(ascending=False).head(3)
+        for i, (empresa, valor) in enumerate(top_retorno.items(), 1):
+            st.markdown(f"{i}. **{empresa}**: {valor:.1f}%")
+    
+    with col_r2:
+        st.markdown("**📉 Menor Volatilidad**")
+        volatilidades = returns.std() * np.sqrt(252) * 100
+        top_vol = volatilidades.sort_values().head(3)
+        for i, (empresa, valor) in enumerate(top_vol.items(), 1):
+            st.markdown(f"{i}. **{empresa}**: {valor:.1f}%")
+    
+    with col_r3:
+        st.markdown("**🎯 Mejor Sharpe Ratio**")
+        sharpe_ratios = (returns.mean() * 252 - st.session_state.tasa_riesgo) / (returns.std() * np.sqrt(252))
+        top_sharpe = sharpe_ratios.sort_values(ascending=False).head(3)
+        for i, (empresa, valor) in enumerate(top_sharpe.items(), 1):
+            st.markdown(f"{i}. **{empresa}**: {valor:.2f}")
+    
+    st.markdown("---")
+    
+    st.subheader("📈 Evolución de Precios Normalizados (Base 100)")
+    
+    if not close_prices.empty:
+        precios_norm = close_prices / close_prices.iloc[0] * 100
         
-        # Calcular métricas básicas
-        retorno_total = (df_close.iloc[-1] / df_close.iloc[0] - 1) * 100
-        volatilidad_anual = df_returns.std() * np.sqrt(252) * 100
+        fig_precios = go.Figure()
+        for col in precios_norm.columns:
+            fig_precios.add_trace(go.Scatter(
+                x=precios_norm.index,
+                y=precios_norm[col],
+                name=col,
+                mode='lines',
+                hovertemplate='<b>%{x}</b><br>%{y:.1f}'
+            ))
         
-        cols = st.columns(min(len(df_close.columns), 4))
-        for i, col in enumerate(df_close.columns):
-            if i < 4:
-                with cols[i]:
-                    st.metric(
-                        label=f"{col} - Retorno", 
-                        value=f"{df_close[col].iloc[-1]:.2f}", 
-                        delta=f"{retorno_total[col]:.2f}%"
-                    )
-                    st.caption(f"Volatilidad: {volatilidad_anual[col]:.2f}%")
-
-    # --- TAB 2: PRECIOS ---
-    with tab2:
-        st.header("📊 Evolución Histórica de Precios")
-        fig_precios = px.line(df_close, title="Precios de Cierre (Base 100 recomendada para comparación)")
-        fig_precios.update_layout(template="plotly_white", height=500)
+        fig_precios.update_layout(
+            height=400,
+            title="Comparación de Performance (Base 100)",
+            xaxis_title="Fecha",
+            yaxis_title="Precio Normalizado",
+            hovermode='x unified'
+        )
         st.plotly_chart(fig_precios, use_container_width=True)
 
-    # --- TAB 3: RIESGO ---
-    with tab3:
-        st.header("⚠️ Análisis de Volatilidad y Riesgo (VaR)")
-        # VaR Histórico al 95%
-        var_95 = df_returns.quantile(0.05) * 100
-        st.write("Value at Risk (VaR) al 95% de confianza (Pérdida máxima diaria esperada):")
-        st.bar_chart(var_95 * -1) # Mostrar en positivo para el gráfico
-
-    # --- TAB 4: DRAWDOWN ---
-    with tab4:
-        st.header("📉 Análisis de Drawdown (Caídas Máximas)")
-        roll_max = df_close.cummax()
-        drawdown = (df_close / roll_max) - 1
-        fig_dd = px.line(drawdown * 100, title="Drawdown Porcentual (%)")
-        fig_dd.update_layout(template="plotly_white", height=500)
-        st.plotly_chart(fig_dd, use_container_width=True)
-
-    # --- TAB 5: CORRELACIONES ---
-    with tab5:
-        st.header("🔄 Matriz de Correlaciones")
-        st.markdown("Evalúa cómo se mueven los activos peruanos entre sí.")
-        corr_matrix = df_returns.corr()
-        fig_corr = px.imshow(corr_matrix, text_auto=".2f", color_continuous_scale="RdBu_r", aspect="auto")
-        fig_corr.update_layout(height=500)
-        st.plotly_chart(fig_corr, use_container_width=True)
-
-    # --- TAB 6: RECOMENDACIONES ---
-    with tab6:
-        st.header("🎯 Sugerencias de Posicionamiento")
-        st.markdown("Basado puramente en el desempeño histórico reciente (Sharpe Ratio).")
-        # Sharpe Ratio simplificado (Risk free = 0 para simulación)
-        sharpe = (df_returns.mean() / df_returns.std()) * np.sqrt(252)
-        st.dataframe(sharpe.rename("Sharpe Ratio").sort_values(ascending=False))
-
-    # --- TAB 7: PORTFOLIO ROSTADINA ---
-    with tab7:
-        st.header("🏢 Configuración de Portfolio ROSTADINA")
-        st.markdown("Estructura tu propia cartera de inversión local.")
-        # Simulación de pesos equitativos
-        pesos = np.ones(len(df_close.columns)) / len(df_close.columns)
-        retorno_port = (df_returns * pesos).sum(axis=1)
-        retorno_acum_port = (1 + retorno_port).cumprod()
+# ============================================================================
+# TAB 2: PRECIOS
+# ============================================================================
+with tab2:
+    st.markdown('<h2 class="sub-header">📊 Análisis de Precios y Retornos</h2>', unsafe_allow_html=True)
+    
+    if not close_prices.empty:
+        empresa_seleccionada = st.selectbox(
+            "Selecciona una empresa para análisis detallado:",
+            options=close_prices.columns.tolist(),
+            key="empresa_precios"
+        )
         
-        fig_port = px.line(retorno_acum_port, title="Crecimiento de S/ 1.00 Invertido (Equiponderado)")
-        fig_port.update_layout(template="plotly_white", height=400)
-        st.plotly_chart(fig_port, use_container_width=True)
-
-    # ============================================================================
-    # --- TAB 8: MOTOR DE AUDITORÍA DE RIESGO CON INTELIGENCIA ARTIFICIAL (SEM) ---
-    # ============================================================================
-    with tab8:
-        st.header("🤖 ROSTADINA AI — Especificación Multi-Factor de Riesgo")
-        st.markdown("Evaluación algorítmica tridimensional que procesa simultáneamente variables macroeconómicas globales, microeconómicas corporativas y la coyuntura político-social de Perú.")
+        col1, col2 = st.columns([2, 1])
         
-        # 1. Base de Ingesta del Modelo
-        st.subheader("📰 Ingesta Actual de Hechos de Importancia y Noticias (Perú)")
-        
-        noticias_actuales = [
-            {"texto": "Global copper prices hit record high amid supply chain disruptions.", "capa": "macro"},
-            {"texto": "Federal Reserve signals interest rate cuts for the upcoming quarter.", "capa": "macro"},
-            {"texto": "Nuevos conflictos sociales paralizan por completo el corredor minero en el sur peruano.", "capa": "social"},
-            {"texto": "Incertidumbre política genera ruido institucional en el Congreso de la República.", "capa": "social"},
-            {"texto": "Credicorp reports record high profits and revenue growth for the quarter.", "capa": "micro"}
-        ]
-        
-        with st.expander("📋 Ver fuentes documentales precargadas en el Pipeline"):
-            df_noticias = pd.DataFrame(noticias_actuales)
-            df_noticias.columns = ["Titular / Hecho de Importancia", "Capa Analítica"]
-            st.table(df_noticias)
+        with col1:
+            st.subheader(f"Precios de {empresa_seleccionada}")
             
-        # 2. Ejecución del Core de IA
-        if st.button("🔄 Lanzar Auditoría de Sentimiento & Estrés Colectivo", key="btn_ia_sem"):
-            with st.spinner("Iniciando Transformers... Traduciendo al inglés técnico e infiriendo mediante redes neuronales FinBERT..."):
-                
-                # Llamada limpia a la función que definimos en la PARTE 1
-                SEM, I_macro, I_social, I_micro, lista_noticias = procesar_riesgo_ia(noticias_actuales)
-                
-                st.markdown("### 📊 Indicadores Sectoriales Ponderados")
-                col1, col2, col3 = st.columns(3)
-                col1.metric("Sub-Índice Macro (Global - Peso 40%)", f"{I_macro:+.4f}")
-                col2.metric("Sub-Índice Social (Perú - Peso 35%)", f"{I_social:+.4f}")
-                col3.metric("Sub-Índice Micro (BVL - Peso 25%)", f"{I_micro:+.4f}")
-                
-                st.markdown("---")
-                
-                col_grafico, col_consejo = st.columns([2, 3])
-                
-                with col_grafico:
-                    st.markdown("<h4 style='text-align: center;'>Ubicación del SEM en la Curva de Estrés</h4>", unsafe_allow_html=True)
-                    fig_gauge = go.Figure(go.Indicator(
-                        mode="gauge+number",
-                        value=SEM,
-                        domain={'x': [0, 1], 'y': [0, 1]},
-                        gauge={
-                            'axis': {'range': [0, 100], 'tickwidth': 1, 'tickcolor': "#2c3e50"},
-                            'bar': {'color': "#2c3e50"},
-                            'bgcolor': "white",
-                            'borderwidth': 1,
-                            'bordercolor': "gray",
-                            'steps': [
-                                {'range': [0, 25], 'color': '#2ecc71'},   
-                                {'range': [25, 50], 'color': '#f1c40f'},  
-                                {'range': [50, 75], 'color': '#e67e22'},  
-                                {'range': [75, 100], 'color': '#e74c3c'}  
-                            ],
-                        }
-                    ))
-                    fig_gauge.update_layout(height=280, margin=dict(l=30, r=30, t=10, b=10))
-                    st.plotly_chart(fig_gauge, use_container_width=True)
-                    
-                with col_consejo:
-                    st.markdown("<h4>Métrica de Intervalo y Guía de Decisiones Directivas</h4>", unsafe_allow_html=True)
-                    if 0 <= SEM <= 25:
-                        st.success("### 🟢 RIESGO COMPRENSIVO BAJO")
-                        consejo = "**Consejo Corporativo:** Fase de expansión de portafolios. Maximizar la exposición en activos cíclicos y renta variable de la BVL."
-                    elif 25 < SEM <= 50:
-                        st.warning("### 🟡 RIESGO MODERADO RESILIENTE")
-                        consejo = "**Consejo Corporativo:** Mantener posiciones. Se sugiere estructurar coberturas cambiarias parciales (Forward PEN/USD) frente a volatilidad interna."
-                    elif 50 < SEM <= 75:
-                        st.error("### 🟠 RIESGO COMPORTAMENTAL ALTO")
-                        consejo = "**Consejo Corporativo:** Reducir duración de portafolios de renta fija. Direccionar flujos excedentes hacia activos defensivos de alta liquidez."
-                    else:
-                        st.error("### 🔴 ALERTA SISTÉMICA / ESTRÉS CRÍTICO")
-                        consejo = "**Consejo Corporativo:** Preservación absoluta del capital corporativo. Liquidar posiciones de Beta elevado. Refugio en Dólares."
-                    
-                    st.write(consejo)
-                    
-                st.markdown("---")
-                
-                with st.expander("🔍 Ver Auditoría de Inferencia y Confianza por Titular"):
-                    for n in lista_noticias:
-                        badge = "🟢" if n['sentimiento'] == 'POSITIVE' else ("🔴" if n['sentimiento'] == 'NEGATIVE' else "⚪")
-                        st.markdown(f"**{badge} [{n['capa']}]** | {n['noticia']}")
-                        st.caption(f"Inferencia FinBERT: *{n['sentimiento']}* | Confianza del Modelo: **{n['confianza']:.2%}**")
-                        
-                with st.expander("🧮 Ver Especificación de Ecuaciones y Ponderaciones"):
-                    st.latex(r"S_{raw} = 0.40 \cdot I_{macro} + 0.35 \cdot I_{social} + 0.25 \cdot I_{micro}")
-                    st.latex(r"SEM = 50 \times (1 - S_{raw})")
-                    
-                st.markdown("<br>", unsafe_allow_html=True)
-                if st.button("📥 Exportar Informe (PDF)", key="btn_pdf_premium"):
-                    st.info("⭐ Función Premium. Conecta con Stripe para habilitar descargas ejecutivas automatizadas para Directorios.")
-
-else:
-    # Mensaje principal cuando aún no se han cargado datos
-    st.info("👋 Bienvenido al Monitor Forense. Configura los activos en la barra lateral izquierda y haz clic en 'Ejecutar Análisis de Riesgo' para comenzar.")
+            fig_precio = go.Figure()
+            fig_precio.add_trace(go.Scatter(
+                x=close_prices.index,
+                y=close_prices[empresa_seleccionada],
+                mode='lines',
+                name='Precio',
+                line=dict(color='blue', width=2),
+                fill='tozeroy',
+                fillcolor='rgba(0, 0, 255, 0.1)'
+            ))
+            
+            if len(close_prices) > 30:
+                media_movil = close_prices[empresa_seleccionada].rolling(window=30).mean()
+                fig_precio.add_trace(go.Scatter(
+                    x=media_movil.index,
+                    y=media_movil,
+                    mode='lines',
+                    name='Media Móvil 30 días',
+                    line=dict(color='red', width=1, dash='dash')
+                ))
+            
+            fig_precio.update_layout(
+                height=400,
+                title=f"Precio Histórico - {empresa_seleccionada}",
+                xaxis_title="Fecha",
+                yaxis_title="Precio (USD)",
+                hovermode='x unified'
+            )
+            st.plotly_chart(fig_precio, use_container_width=True)
+        
+        with col2:
+            st.subheader("📊 Estadísticas")
+            
+            precio_actual = close_prices[empresa_seleccionada].iloc[-1]
+            precio_max = close_prices[empresa_seleccionada].max()
+            precio_min = close_prices[empresa_seleccionada].min()
+            precio_prom = close_prices[empresa_seleccionada].mean()
+            
+            st.markdown('<div class="metric-box">', unsafe_allow_html=True)
+            st.metric("Precio Actual", f"${precio_actual:.2f}")
+            st.metric("Máximo Histórico", f"${precio_max:.2f}")
+            st.metric("Mínimo Histórico", f"${precio_min:.2f}")
+            st.metric("Precio Promedio", f"${precio_prom:.2f}")
+            st.markdown('</div>', unsafe_allow_html=True)
+            
+            if empresa_seleccionada in returns.columns:
+                vol_diaria = returns[empresa_seleccionada].std() * 100
+                st.metric("Volatilidad Diaria", f"{vol_diaria:.2f}%")
+        
+        st.subheader("📈 Retornos Diarios")
+        
+        if empresa_seleccionada in returns.columns:
+            fig_retornos = go.Figure()
+            fig_retornos.add_trace(go.Scatter(
+                x=returns.index,
+                y=returns[empresa_seleccionada] * 100,
+                mode='lines',
+                name='Retornos',
+                line=dict(color='green', width=1),
+                hovertemplate='<b>%{x}</b><br>Retorno: %{y:.2f}%'
+            ))
+            
+            fig_retornos.update_layout(
+                height=300,
+                title=f"Retornos Diarios - {empresa_seleccionada}",
+                xaxis_title="Fecha",
+                yaxis_title="Retorno (%)",
+                hovermode='x unified'
+            )
+            st.plotly_chart(fig_retornos, use_container_width=True)
+            
+            st.subheader("📊 Distribución de Retornos")
+            
+            fig_hist = px.histogram(
+                x=returns[empresa_seleccionada] * 100,
+                nbins=50,
+                title=f"Distribución de Retornos Diarios - {empresa_seleccionada}",
+                labels={'x': 'Retorno Diario (%)', 'y': 'Frecuencia'}
+            )
+            
+            fig_hist.update_layout(height=300)
+            st.plotly_chart(fig_hist, use_container_width=True)
 
 # ============================================================================
-# PIE DE PÁGINA Y DISCLAIMER LEGAL OBLIGATORIO
+# TAB 3: RIESGO
 # ============================================================================
-st.markdown("<br><br>", unsafe_allow_html=True)
+with tab3:
+    st.markdown('<h2 class="sub-header">⚠️ Análisis Detallado de Riesgo</h2>', unsafe_allow_html=True)
+    
+    if not returns.empty:
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            metrica_comparar = st.selectbox(
+                "Comparar por:",
+                ["Volatilidad Anual", "VaR 95%", "Retorno Anual", "Sharpe Ratio"],
+                key="metrica_riesgo"
+            )
+        
+        with col2:
+            orden_comparacion = st.radio(
+                "Orden:",
+                ["Mayor a menor", "Menor a mayor"],
+                horizontal=True,
+                key="orden_riesgo"
+            )
+        
+        datos_comparacion = []
+        
+        for empresa in returns.columns:
+            vol_anual = returns[empresa].std() * np.sqrt(252) * 100
+            ret_anual = ((1 + returns[empresa].mean())**252 - 1) * 100
+            var_95 = returns[empresa].quantile(0.05) * 100
+            
+            sharpe = np.nan
+            if vol_anual > 0:
+                sharpe = (ret_anual/100 - st.session_state.tasa_riesgo) / (vol_anual/100)
+            
+            if metrica_comparar == "Volatilidad Anual":
+                valor = vol_anual if not pd.isna(vol_anual) else 0
+            elif metrica_comparar == "VaR 95%":
+                valor = abs(var_95) if not pd.isna(var_95) else 0
+            elif metrica_comparar == "Retorno Anual":
+                valor = ret_anual if not pd.isna(ret_anual) else 0
+            elif metrica_comparar == "Sharpe Ratio":
+                valor = sharpe if not pd.isna(sharpe) else 0
+            
+            datos_comparacion.append({
+                "Empresa": empresa,
+                "Valor": valor,
+                "Volatilidad Anual": vol_anual,
+                "Retorno Anual": ret_anual,
+                "VaR 95%": abs(var_95) if not pd.isna(var_95) else np.nan,
+                "Sharpe Ratio": sharpe
+            })
+        
+        df_comparacion = pd.DataFrame(datos_comparacion)
+        ascendente = (orden_comparacion == "Menor a mayor")
+        df_comparacion = df_comparacion.sort_values("Valor", ascending=ascendente)
+        
+        fig_comparacion = go.Figure()
+        
+        colores = []
+        for valor in df_comparacion["Valor"]:
+            if pd.isna(valor):
+                colores.append('gray')
+            elif metrica_comparar in ["Volatilidad Anual", "VaR 95%"]:
+                if valor > df_comparacion["Valor"].quantile(0.75):
+                    colores.append('red')
+                elif valor > df_comparacion["Valor"].quantile(0.25):
+                    colores.append('orange')
+                else:
+                    colores.append('green')
+            else:
+                if valor > df_comparacion["Valor"].quantile(0.75):
+                    colores.append('green')
+                elif valor > df_comparacion["Valor"].quantile(0.25):
+                    colores.append('orange')
+                else:
+                    colores.append('red')
+        
+        fig_comparacion.add_trace(go.Bar(
+            x=df_comparacion["Empresa"],
+            y=df_comparacion["Valor"],
+            marker_color=colores,
+            text=df_comparacion["Valor"].apply(lambda x: f"{x:.2f}" if not pd.isna(x) else "N/A"),
+            textposition='auto'
+        ))
+        
+        fig_comparacion.update_layout(
+            height=400,
+            title=f"Comparación de {metrica_comparar}",
+            xaxis_title="Empresa",
+            yaxis_title=metrica_comparar
+        )
+        st.plotly_chart(fig_comparacion, use_container_width=True)
+        
+        st.subheader("📋 Tabla Completa de Métricas de Riesgo")
+        
+        tabla_riesgo = []
+        for empresa in returns.columns:
+            vol_anual = returns[empresa].std() * np.sqrt(252) * 100
+            ret_anual = ((1 + returns[empresa].mean())**252 - 1) * 100
+            var_95 = returns[empresa].quantile(0.05) * 100
+            
+            sharpe = np.nan
+            if vol_anual > 0:
+                sharpe = (ret_anual/100 - st.session_state.tasa_riesgo) / (vol_anual/100)
+            
+            max_ret = returns[empresa].max() * 100
+            min_ret = returns[empresa].min() * 100
+            
+            if pd.isna(vol_anual):
+                riesgo = "N/A"
+            elif vol_anual < 15:
+                riesgo = "🟢 BAJO"
+            elif vol_anual < 25:
+                riesgo = "🟡 MODERADO"
+            elif vol_anual < 35:
+                riesgo = "🟠 ALTO"
+            else:
+                riesgo = "🔴 MUY ALTO"
+            
+            tabla_riesgo.append({
+                "Empresa": empresa,
+                "Volatilidad Anual": f"{vol_anual:.1f}%" if not pd.isna(vol_anual) else "N/A",
+                "Retorno Anual": f"{ret_anual:.1f}%" if not pd.isna(ret_anual) else "N/A",
+                "VaR 95% Diario": f"{abs(var_95):.1f}%" if not pd.isna(var_95) else "N/A",
+                "Sharpe Ratio": f"{sharpe:.2f}" if not pd.isna(sharpe) else "N/A",
+                "Máx Retorno Diario": f"{max_ret:.1f}%",
+                "Mín Retorno Diario": f"{min_ret:.1f}%",
+                "Nivel Riesgo": riesgo
+            })
+        
+        df_tabla_riesgo = pd.DataFrame(tabla_riesgo)
+        st.dataframe(df_tabla_riesgo, use_container_width=True, hide_index=True)
+        
+        st.subheader("📈 Volatilidad Rolling (60 días)")
+        
+        fig_vol_rolling = go.Figure()
+        ventana = 60
+        
+        for empresa in returns.columns:
+            if len(returns[empresa]) > ventana:
+                vol_rolling = returns[empresa].rolling(window=ventana).std() * np.sqrt(252) * 100
+                fig_vol_rolling.add_trace(go.Scatter(
+                    x=vol_rolling.index,
+                    y=vol_rolling,
+                    mode='lines',
+                    name=empresa,
+                    hovertemplate='<b>%{x}</b><br>Volatilidad: %{y:.1f}%'
+                ))
+        
+        if len(fig_vol_rolling.data) > 0:
+            fig_vol_rolling.update_layout(
+                height=400,
+                title=f"Volatilidad Anualizada Rolling ({ventana} días)",
+                xaxis_title="Fecha",
+                yaxis_title="Volatilidad Anualizada (%)",
+                hovermode='x unified'
+            )
+            st.plotly_chart(fig_vol_rolling, use_container_width=True)
+        else:
+            st.info(f"Se necesitan más de {ventana} días de datos para calcular volatilidad rolling")
+
+# ============================================================================
+# TAB 4: DRAWDOWN
+# ============================================================================
+with tab4:
+    st.header("📉 Análisis de Drawdown")
+    
+    fig_dd = go.Figure()
+    
+    for empresa in close_prices.columns:
+        dd_serie = calcular_drawdown(close_prices[empresa])
+        if not dd_serie.empty:
+            fig_dd.add_trace(go.Scatter(
+                x=dd_serie.index,
+                y=dd_serie * 100,
+                name=empresa,
+                mode='lines'
+            ))
+    
+    fig_dd.update_layout(
+        height=400,
+        title="Drawdown Histórico",
+        xaxis_title="Fecha",
+        yaxis_title="Drawdown (%)"
+    )
+    st.plotly_chart(fig_dd, use_container_width=True)
+    
+    st.subheader("Máximos Drawdowns")
+    
+    dd_data = []
+    for empresa in close_prices.columns:
+        dd_serie = calcular_drawdown(close_prices[empresa])
+        if not dd_serie.empty:
+            max_dd = dd_serie.min() * 100
+            fecha_dd = dd_serie.idxmin()
+            dd_data.append({
+                "Empresa": empresa,
+                "Drawdown Máx": f"{abs(max_dd):.1f}%",
+                "Fecha Máx Drawdown": fecha_dd.strftime('%Y-%m-%d')
+            })
+    
+    if dd_data:
+        st.table(pd.DataFrame(dd_data))
+
+# ============================================================================
+# PARTE 9 DE 10: TABS 5-7 (CORRELACIONES, RECOMENDACIONES, PORTFOLIO)
+# ============================================================================
+
+# ============================================================================
+# TAB 5: CORRELACIONES
+# ============================================================================
+with tab5:
+    st.header("🔄 Análisis de Correlaciones")
+    
+    if len(returns.columns) > 1:
+        corr_matrix = returns.corr()
+        
+        fig_corr = go.Figure(data=go.Heatmap(
+            z=corr_matrix.values,
+            x=corr_matrix.columns,
+            y=corr_matrix.columns,
+            colorscale='RdBu',
+            zmid=0,
+            text=corr_matrix.values.round(2),
+            texttemplate='%{text}',
+            hoverongaps=False
+        ))
+        
+        fig_corr.update_layout(
+            height=500,
+            title="Matriz de Correlación",
+            xaxis_title="",
+            yaxis_title=""
+        )
+        st.plotly_chart(fig_corr, use_container_width=True)
+        
+        st.subheader("📊 Análisis de Diversificación")
+        
+        if len(corr_matrix) > 1:
+            mask = np.triu(np.ones_like(corr_matrix, dtype=bool), k=1)
+            corr_vals = corr_matrix.where(mask).stack()
+            
+            if len(corr_vals) > 0:
+                avg_corr = corr_vals.mean()
+                st.metric("Correlación Promedio", f"{avg_corr:.3f}")
+                
+                if avg_corr > 0.7:
+                    st.error("⚠️ **Alta correlación** - Poca diversificación entre activos")
+                    st.info("Recomendación: Considerar agregar activos de diferentes sectores")
+                elif avg_corr > 0.4:
+                    st.warning("⚠️ **Correlación moderada** - Diversificación aceptable")
+                else:
+                    st.success("✅ **Baja correlación** - Buena diversificación del portfolio")
+    else:
+        st.info("ℹ️ Se necesitan al menos 2 empresas para analizar correlaciones")
+
+# ============================================================================
+# TAB 6: RECOMENDACIONES
+# ============================================================================
+with tab6:
+    st.header("🎯 Recomendaciones de Inversión")
+    
+    st.subheader("📊 Clasificación por Nivel de Riesgo")
+    
+    riesgo_data = []
+    for empresa in returns.columns:
+        vol = returns[empresa].std() * np.sqrt(252) * 100
+        ret_anual = ((1 + returns[empresa].mean())**252 - 1) * 100
+        
+        if pd.isna(vol) or vol < 15:
+            riesgo = "BAJO"
+            recomendacion = "Adecuada para perfiles conservadores"
+        elif vol < 25:
+            riesgo = "MODERADO"
+            recomendacion = "Balance riesgo/retorno para perfiles moderados"
+        elif vol < 35:
+            riesgo = "ALTO"
+            recomendacion = "Solo para perfiles agresivos con tolerancia al riesgo"
+        else:
+            riesgo = "MUY ALTO"
+            recomendacion = "Alto riesgo - Considerar posiciones pequeñas"
+        
+        riesgo_data.append({
+            "Empresa": empresa,
+            "Volatilidad": f"{vol:.1f}%",
+            "Retorno Anual": f"{ret_anual:.1f}%" if not pd.isna(ret_anual) else "N/A",
+            "Nivel Riesgo": riesgo,
+            "Recomendación": recomendacion
+        })
+    
+    st.table(pd.DataFrame(riesgo_data))
+    
+    st.subheader("👤 Estrategias por Perfil de Inversor")
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.markdown('<div class="metric-box">', unsafe_allow_html=True)
+        st.markdown("**🏦 Perfil Conservador**")
+        st.markdown("- **Objetivo**: Preservar capital")
+        st.markdown("- **Horizonte**: Largo plazo (5+ años)")
+        st.markdown("- **Estrategia**: Buy & Hold")
+        st.markdown("- **Empresas recomendadas**: Baja volatilidad, dividendos estables")
+        st.markdown("</div>", unsafe_allow_html=True)
+    
+    with col2:
+        st.markdown('<div class="metric-box">', unsafe_allow_html=True)
+        st.markdown("**⚖️ Perfil Moderado**")
+        st.markdown("- **Objetivo**: Crecimiento con control de riesgo")
+        st.markdown("- **Horizonte**: Medio plazo (2-5 años)")
+        st.markdown("- **Estrategia**: Diversificación sectorial")
+        st.markdown("- **Empresas recomendadas**: Mix de crecimiento y valor")
+        st.markdown("</div>", unsafe_allow_html=True)
+    
+    with col3:
+        st.markdown('<div class="metric-box">', unsafe_allow_html=True)
+        st.markdown("**🚀 Perfil Agresivo**")
+        st.markdown("- **Objetivo**: Maximizar retornos")
+        st.markdown("- **Horizonte**: Corto/medio plazo (1-3 años)")
+        st.markdown("- **Estrategia**: Trading activo, momentum")
+        st.markdown("- **Empresas recomendadas**: Alta volatilidad, alto crecimiento")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+# ============================================================================
+# TAB 7: PORTFOLIO ROSTADINA
+# ============================================================================
+with tab7:
+    st.markdown('<h2 class="main-header">🏢 Portfolio de Inversión - ROSTADINA EIRL</h2>', unsafe_allow_html=True)
+    
+    st.markdown("""
+    <div class="portfolio-box">
+    <h3>🎯 Configuración de Portfolio Específico</h3>
+    <p>En esta sección puedes configurar un portfolio de inversión personalizado para ROSTADINA EIRL.
+    Las demás pestañas funcionan independientemente de esta configuración.</p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    if not st.session_state.data_loaded:
+        st.warning("Primero carga datos de mercado en la barra lateral")
+        st.stop()
+    
+    with st.expander("⚙️ **Configurar Portfolio ROSTADINA**", expanded=True):
+        col_c1, col_c2 = st.columns(2)
+        
+        with col_c1:
+            capital_total = st.number_input(
+                "💰 Capital Total a Invertir (USD)", 
+                min_value=10000, 
+                max_value=10000000, 
+                value=1000000,
+                step=50000,
+                key="portfolio_capital"
+            )
+            st.session_state.capital_total = capital_total
+        
+        with col_c2:
+            st.markdown("**📊 Empresas Disponibles**")
+            empresas_disponibles = list(returns.columns)
+            st.info(f"{len(empresas_disponibles)} empresas disponibles del análisis general")
+        
+        st.markdown("---")
+        st.markdown("#### 🎯 Distribución del Portfolio")
+        
+        if not st.session_state.portfolio_dist:
+            empresas_disponibles = list(returns.columns)
+            if empresas_disponibles:
+                n_empresas = len(empresas_disponibles)
+                for ticker in empresas_disponibles:
+                    st.session_state.portfolio_dist[ticker] = round(100/n_empresas, 1)
+        
+        empresas_disponibles = list(returns.columns)
+        
+        if not empresas_disponibles:
+            st.error("No hay empresas disponibles para configurar el portfolio")
+            st.stop()
+        
+        suma_actual = sum(st.session_state.portfolio_dist.get(ticker, 0) 
+                         for ticker in empresas_disponibles)
+        
+        if abs(suma_actual - 100) > 0.1:
+            for ticker in empresas_disponibles:
+                if suma_actual > 0:
+                    st.session_state.portfolio_dist[ticker] = (
+                        st.session_state.portfolio_dist.get(ticker, 0) * 100 / suma_actual
+                    )
+                else:
+                    st.session_state.portfolio_dist[ticker] = 100 / len(empresas_disponibles)
+        
+        suma_acumulada = 0
+        
+        for i, ticker in enumerate(empresas_disponibles):
+            valor_actual = st.session_state.portfolio_dist.get(ticker, 0)
+            suma_restante = 100 - suma_acumulada
+            max_valor = min(100, int(suma_restante + valor_actual))
+            
+            if max_valor <= 0:
+                max_valor = 1
+            
+            nuevo_valor = st.slider(
+                f"{ticker} (%)",
+                0, 
+                max_valor, 
+                int(valor_actual),
+                key=f"portfolio_slider_{ticker}"
+            )
+            
+            st.session_state.portfolio_dist[ticker] = nuevo_valor
+            suma_acumulada += nuevo_valor
+        
+        if len(empresas_disponibles) > 0:
+            ultima_empresa = empresas_disponibles[-1]
+            suma_sin_ultima = sum(
+                st.session_state.portfolio_dist.get(t, 0) 
+                for t in empresas_disponibles[:-1]
+            )
+            
+            if suma_sin_ultima < 100:
+                st.session_state.portfolio_dist[ultima_empresa] = 100 - suma_sin_ultima
+                st.info(f"{ultima_empresa} ajustado a: {100 - suma_sin_ultima:.1f}%")
+        
+        suma_final = sum(st.session_state.portfolio_dist.values())
+        st.markdown(f"**Suma total:** {suma_final:.1f}%")
+        
+        if abs(suma_final - 100) > 0.1:
+            st.error(f"⚠️ La distribución debe sumar exactamente 100% (actual: {suma_final:.1f}%)")
+            st.markdown('<div class="warning-box">', unsafe_allow_html=True)
+            st.markdown("**Sugerencia:** Ajusta los valores manualmente o usa el botón de distribución equitativa")
+            st.markdown('</div>', unsafe_allow_html=True)
+        
+        if st.button("⚖️ Distribución Equitativa", use_container_width=True):
+            n_empresas = len(empresas_disponibles)
+            for ticker in empresas_disponibles:
+                st.session_state.portfolio_dist[ticker] = round(100/n_empresas, 1)
+            st.success("✅ Distribución equitativa aplicada")
+            st.rerun()
+        
+        if st.button("✅ Activar Análisis de Portfolio", type="primary", use_container_width=True):
+            suma_final = sum(st.session_state.portfolio_dist.values())
+            
+            if abs(suma_final - 100) <= 0.1:
+                st.session_state.portfolio_configured = True
+                st.success("✅ Portfolio configurado exitosamente!")
+                st.rerun()
+            else:
+                factor = 100 / suma_final
+                for ticker in st.session_state.portfolio_dist:
+                    st.session_state.portfolio_dist[ticker] *= factor
+                
+                st.session_state.portfolio_configured = True
+                st.warning("⚠️ Distribución ajustada automáticamente para sumar 100%")
+                st.rerun()
+
+# ============================================================================
+# PARTE 10 DE 10: TAB 8 (AUDITORÍA DE RIESGO IA) Y PIE DE PÁGINA
+# ============================================================================
+
+# ============================================================================
+# TAB 8: MOTOR DE AUDITORÍA DE RIESGO CON INTELIGENCIA ARTIFICIAL (SEM)
+# ============================================================================
+with tab8:
+    st.header("🤖 ROSTADINA AI — Especificación Multi-Factor de Riesgo")
+    st.markdown("Evaluación algorítmica tridimensional que procesa simultáneamente variables macroeconómicas globales, microeconómicas corporativas y la coyuntura político-social de Perú.")
+    
+    # 1. Base de Ingesta del Modelo (Titulares actuales - 100% ENFOQUE PERUANO)
+    st.subheader("📰 Ingesta Actual de Hechos de Importancia y Noticias")
+    
+    noticias_actuales = [
+        {"texto": "Global copper prices hit record high amid supply chain disruptions from Peru's mining sector.", "capa": "macro"},
+        {"texto": "Federal Reserve signals interest rate cuts for the upcoming quarter, affecting emerging markets like Peru.", "capa": "macro"},
+        {"texto": "Nuevos conflictos sociales paralizan por completo el corredor minero en el sur peruano.", "capa": "social"},
+        {"texto": "Incertidumbre política genera ruido institucional en el Congreso de la República del Perú.", "capa": "social"},
+        {"texto": "Credicorp reports record high profits and revenue growth for the quarter in the Peruvian market.", "capa": "micro"},
+        {"texto": "Southern Copper Corporation expands operations in Peru amid favorable commodity prices.", "capa": "micro"},
+        {"texto": "Inflation in Peru remains above central bank target, affecting consumer spending.", "capa": "macro"},
+        {"texto": "Mining protests in the Andes region threaten key export routes for Peruvian copper.", "capa": "social"}
+    ]
+    
+    with st.expander("📋 Ver fuentes documentales precargadas en el Pipeline"):
+        df_noticias = pd.DataFrame(noticias_actuales)
+        df_noticias.columns = ["Titular / Hecho de Importancia", "Capa Analítica"]
+        st.table(df_noticias)
+        
+    # 2. Ejecución del Core de IA
+    if st.button("🔄 Lanzar Auditoría de Sentimiento & Estrés Colectivo", key="btn_ia_sem"):
+        with st.spinner("Iniciando Transformers... Traduciendo al inglés técnico e infiriendo mediante redes neuronales FinBERT..."):
+            
+            SEM, I_macro, I_social, I_micro, lista_noticias = procesar_riesgo_ia(noticias_actuales)
+            
+            # 3. Despliegue de Resultados Avanzados
+            st.markdown("### 📊 Indicadores Sectoriales Ponderados")
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Sub-Índice Macro (Global - Peso 40%)", f"{I_macro:+.4f}", help="Impacto directo de Commodities y Tasas Internacionales.")
+            col2.metric("Sub-Índice Social (Perú - Peso 35%)", f"{I_social:+.4f}", help="Estabilidad interna, gobernabilidad y Conflictos Mineros.")
+            col3.metric("Sub-Índice Micro (BVL - Peso 25%)", f"{I_micro:+.4f}", help="Salud financiera y utilidades operativas declaradas por las corporaciones.")
+            
+            st.markdown("---")
+            
+            # 4. Sección de Intervalo Puntual y Gráfico de Velocímetro
+            col_grafico, col_consejo = st.columns([2, 3])
+            
+            with col_grafico:
+                st.markdown("<h4 style='text-align: center;'>Ubicación del SEM en la Curva de Estrés</h4>", unsafe_allow_html=True)
+                fig_gauge = go.Figure(go.Indicator(
+                    mode="gauge+number",
+                    value=SEM,
+                    domain={'x': [0, 1], 'y': [0, 1]},
+                    gauge={
+                        'axis': {'range': [0, 100], 'tickwidth': 1, 'tickcolor': "#2c3e50"},
+                        'bar': {'color': "#2c3e50"},
+                        'bgcolor': "white",
+                        'borderwidth': 1,
+                        'bordercolor': "gray",
+                        'steps': [
+                            {'range': [0, 25], 'color': '#2ecc71'},
+                            {'range': [25, 50], 'color': '#f1c40f'},
+                            {'range': [50, 75], 'color': '#e67e22'},
+                            {'range': [75, 100], 'color': '#e74c3c'}
+                        ],
+                    }
+                ))
+                fig_gauge.update_layout(height=280, margin=dict(l=30, r=30, t=10, b=10))
+                st.plotly_chart(fig_gauge, use_container_width=True)
+                
+            with col_consejo:
+                st.markdown("<h4>Métrica de Intervalo y Guía de Decisiones Directivas</h4>", unsafe_allow_html=True)
+                if 0 <= SEM <= 25:
+                    st.success("### 🟢 RIESGO COMPRENSIVO BAJO")
+                    consejo = ("**Análisis Metodológico:** Confluencia altamente positiva en variables macro y estabilidad social interna.\n\n"
+                               "**Consejo Corporativo:** Fase de expansión de portafolios. Maximizar la exposición en activos cíclicos y renta variable de la BVL. Se aprueba apalancamiento estratégico para proyectos de inversión de capital (Capex).")
+                elif 25 < SEM <= 50:
+                    st.warning("### 🟡 RIESGO MODERADO RESILIENTE")
+                    consejo = ("**Análisis Metodológico:** Los fundamentos macroeconómicos externos absorben eficientemente el ruido político e institucional local.\n\n"
+                               "**Consejo Corporativo:** Mantener posiciones estructurales vigentes. Se sugiere estructurar coberturas cambiarias parciales (Forward PEN/USD) frente a picos transitorios de volatilidad en la coyuntura interna.")
+                elif 50 < SEM <= 75:
+                    st.error("### 🟠 RIESGO COMPORTAMENTAL ALTO")
+                    consejo = ("**Análisis Metodológico:** El estrés socio-político latente o la corrección de precios de commodities clave comprometen severamente las proyecciones de utilidades microeconómicas.\n\n"
+                               "**Consejo Corporativo:** Reducir agresivamente la duración de portafolios de renta fija. Congelar planes de expansión operativa no esenciales y direccionar flujos excedentes hacia activos defensivos de alta liquidez.")
+                else:
+                    st.error("### 🔴 ALERTA SISTÉMICA / ESTRÉS CRÍTICO")
+                    consejo = ("**Análisis Metodológico:** Quiebre estructural. Shock negativo simultáneo en los mercados internacionales y parálisis operativa y de gobernabilidad a nivel doméstico.\n\n"
+                               "**Consejo Corporativo:** Preservación estricta y absoluta del capital corporativo. Liquidar posiciones de Beta elevado. Refugio de tesorería total en liquidez dura institucional (Dólares soberanos o Treasury Bills de EE.UU.). Activación inmediata del plan de contingencia de liquidez.")
+                
+                st.write(consejo)
+                
+            st.markdown("---")
+            
+            # 5. Desglose detallado del Sentimiento por Titular
+            with st.expander("🔍 Ver Auditoría de Inferencia y Confianza por Titular"):
+                for n in lista_noticias:
+                    badge = "🟢" if n['sentimiento'] == 'POSITIVE' else ("🔴" if n['sentimiento'] == 'NEGATIVE' else "⚪")
+                    st.markdown(f"**{badge} [{n['capa']}]** | {n['noticia']}")
+                    st.caption(f"Inferencia FinBERT: *{n['sentimiento']}* | Confianza del Modelo: **{n['confianza']:.2%}**")
+                    st.markdown("---")
+                    
+            # 6. Marco Técnico Académico (Fórmulas LaTeX)
+            with st.expander("🧮 Ver Especificación de Ecuaciones y Ponderaciones"):
+                st.markdown("El **Score de Estrés de Mercado (SEM)** es un estimador matricial calculado a partir de la siguiente combinación lineal ponderada:")
+                st.latex(r"S_{raw} = 0.40 \cdot I_{macro} + 0.35 \cdot I_{social} + 0.25 \cdot I_{micro}")
+                st.markdown("Posteriormente, el resultado bruto ($S_{raw} \in [-1, 1]$) es normalizado de forma simétrica e invertido para mapear el estrés en una escala corporativa estándar de 0 a 100 puntos:")
+                st.latex(r"SEM = 50 \times (1 - S_{raw})")
+                
+                st.markdown("### 📊 Interpretación de los Sub-Índices:")
+                st.markdown("""
+                - **I_macro (Macroeconómico)**: Evalúa factores globales como precios de commodities, tasas de interés internacionales y flujos de capital.
+                - **I_social (Social/Político)**: Mide la estabilidad interna, conflictos mineros, gobernabilidad y cohesión social en Perú.
+                - **I_micro (Microeconómico)**: Analiza la salud financiera de empresas peruanas listadas en la BVL, utilidades y perspectivas operativas.
+                """)
+            
+            # 7. Botón Comercial Micro-SaaS
+            st.markdown("<br>", unsafe_allow_html=True)
+            col_b1, col_b2, col_b3 = st.columns([1, 2, 1])
+            with col_b2:
+                if st.button("📥 Exportar Informe Ejecutivo (PDF)", key="btn_pdf_premium", use_container_width=True):
+                    st.info("""
+                    ⭐ **Función Premium - ROSTADINA EIRL**
+                    
+                    Para habilitar la descarga automática de informes ejecutivos en formato PDF, 
+                    por favor contacta a nuestro equipo comercial:
+                    
+                    📧 rodrigoluisyauliblas@icloud.com  
+                    📱 +51 989911582
+                    
+                    *Incluye: Análisis SEM detallado, Gráficos de Estrés, Recomendaciones Directivas*
+                    """)
+
+# ============================================================================
+# PIE DE PÁGINA
+# ============================================================================
+st.sidebar.markdown("---")
+st.sidebar.markdown("**© 2025 ROSTADINA EIRL**")
+st.sidebar.markdown("Dashboard de Análisis Financiero")
+st.sidebar.markdown("Versión 3.0 | Datos: Yahoo Finance")
+st.sidebar.markdown("**Uso:** Análisis general + Portfolio opcional + IA")
+
 st.markdown("---")
-st.markdown(
-    """
-    <div style="background-color: #f8f9fa; padding: 15px; border-left: 5px solid #ffc107; border-radius: 4px;">
-        <p style="margin: 0; font-size: 0.85rem; color: #6c757d; line-height: 1.4;">
-            <strong>⚠️ AVISO DE EXENCIÓN DE RESPONSABILIDAD (DISCLAIMER LEGAL):</strong> 
-            Los reportes, análisis econométricos y scores generados por <strong>ROSTADINA AI</strong> 
-            son herramientas puramente algorítmicas con fines académicos y de simulación. 
-            No constituyen asesoría financiera vinculante ni recomendaciones de compra/venta en la BVL.
-        </p>
-    </div>
-    """, 
-    unsafe_allow_html=True
-)
-
-st.markdown(
-    f"""
-    <div style="text-align: center; color: #a0a0a0; font-size: 0.8rem; margin-top: 20px;">
-        <strong>ROSTADINA EIRL - Inteligencia Financiera Corporativa</strong> | 
-        Última actualización: {datetime.now().strftime("%Y-%m-%d %H:%M")}
-    </div>
-    """, 
-    unsafe_allow_html=True
-)
+st.markdown("""
+<div style="text-align: center; color: gray;">
+    <small>
+        <strong>ROSTADINA EIRL - Dashboard de Análisis Financiero</strong> | 
+        Datos históricos proporcionados por Yahoo Finance | 
+        Última actualización: {date}
+    </small>
+</div>
+""".format(date=datetime.now().strftime("%Y-%m-%d %H:%M")), unsafe_allow_html=True)
